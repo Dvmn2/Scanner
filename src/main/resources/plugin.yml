@@ -1,0 +1,8 @@
+name: Scanner
+version: '${version}'
+
+main: net.dvmn2.scanner.Scanner
+api-version: '1.21.11'
+load: POSTWORLD
+
+authors: [DVMN2]
