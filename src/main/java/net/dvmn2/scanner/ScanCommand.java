@@ -18,6 +18,7 @@ import org.bukkit.entity.ItemDisplay;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
+import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Transformation;
 import org.joml.AxisAngle4f;
 import org.joml.Vector3f;
@@ -25,6 +26,10 @@ import org.joml.Vector3f;
 import java.util.*;
 
 public final class ScanCommand implements CommandExecutor, TabCompleter {
+
+    // ссылка на текущий выполняющийся скан, чтобы можно было отменить его
+    // при повторном вызове команды
+    private BukkitTask activeScanTask;
 
     // Кастомное имя, которым помечаются все спавнящиеся во время скана айтем-дисплеи
     private static final String SCAN_NAME = "scan";
@@ -35,6 +40,7 @@ public final class ScanCommand implements CommandExecutor, TabCompleter {
     private static final long DEFAULT_DELAY_TICKS = 10L; // задержка между шагами (тиков)
     private static final double POINT_SPACING = 1.0;     // примерное расстояние между лучами на сфере (в отображаемых блоках)
     private static final double RAY_STEP = 1.0;          // на сколько реальных блоков луч продвигается за тик
+    private static final int RAYS_PER_TICK = 1500;       // сколько лучей максимум проверяем за один тик
 
     private final JavaPlugin plugin;
 
@@ -128,18 +134,25 @@ public final class ScanCommand implements CommandExecutor, TabCompleter {
 
         sender.sendMessage(ChatColor.GREEN + "Скан запущен!");
 
+        // отменяем предыдущий незавершённый скан, если он ещё работает
+        if (activeScanTask != null && !activeScanTask.isCancelled()) {
+            activeScanTask.cancel();
+        }
+
         final int finalMaxRadius = maxRadius;
         final double finalScale = scale;
 
         // Перед обновлением удаляем все ранее заспавненные айтем-дисплеи скана
         removeScanDisplays(displayWorld);
 
-        new BukkitRunnable() {
+        activeScanTask = new BukkitRunnable() {
             double currentRealDistance = RAY_STEP;
             final boolean[] resolved = new boolean[rayDirections.size()];
-            // Блоки дисплея, на которых уже стоит айтем-дисплей — чтобы не спавнить дубликаты
-            // в одну и ту же ячейку, когда несколько лучей после сжатия совпадают по позиции
             final Set<Long> occupiedDisplayBlocks = new HashSet<>();
+
+            // индексы лучей, которые ещё нужно проверить на текущем currentRealDistance
+            List<Integer> pending = null;
+            int pendingCursor = 0;
 
             @Override
             public void run() {
@@ -148,26 +161,41 @@ public final class ScanCommand implements CommandExecutor, TabCompleter {
                     return;
                 }
 
-                // Продвигаем каждый ещё не "выстреливший" луч на currentRealDistance
-                // и спавним дисплей только для первого встреченного на пути блока
-                for (int i = 0; i < rayDirections.size(); i++) {
-                    if (resolved[i]) {
-                        continue; // этот луч уже нашёл свой первый блок — дальше не проверяем
+                // начинаем новый "проход" по текущему радиусу
+                if (pending == null) {
+                    pending = new ArrayList<>();
+                    for (int i = 0; i < rayDirections.size(); i++) {
+                        if (!resolved[i]) pending.add(i);
                     }
+                    pendingCursor = 0;
+
+                    if (pending.isEmpty()) {
+                        cancel(); // все лучи уже нашли свои блоки — скан можно завершать досрочно
+                        return;
+                    }
+                }
+
+                int processed = 0;
+                while (pendingCursor < pending.size() && processed < RAYS_PER_TICK) {
+                    int i = pending.get(pendingCursor++);
+                    processed++;
 
                     Vector3f dir = rayDirections.get(i);
                     double dx = dir.x * currentRealDistance;
                     double dy = dir.y * currentRealDistance;
                     double dz = dir.z * currentRealDistance;
 
-                    boolean hit = trySpawnFirstHit(scannerBase, displayBase, displayWorld, dx, dy, dz,
-                            finalScale, occupiedDisplayBlocks);
-                    if (hit) {
+                    if (trySpawnFirstHit(scannerBase, displayBase, displayWorld, dx, dy, dz,
+                            finalScale, occupiedDisplayBlocks)) {
                         resolved[i] = true;
                     }
                 }
 
-                currentRealDistance += RAY_STEP;
+                // проход по текущему радиусу закончен — переходим к следующему
+                if (pendingCursor >= pending.size()) {
+                    pending = null;
+                    currentRealDistance += RAY_STEP;
+                }
             }
         }.runTaskTimer(plugin, 0L, delayTicks);
 
