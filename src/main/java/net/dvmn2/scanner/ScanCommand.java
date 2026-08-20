@@ -4,12 +4,13 @@ import com.mojang.brigadier.Command;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
-import com.mojang.brigadier.suggestion.SuggestionProvider;
 import com.mojang.brigadier.tree.LiteralCommandNode;
+
 import io.papermc.paper.command.brigadier.CommandSourceStack;
 import io.papermc.paper.command.brigadier.Commands;
 import io.papermc.paper.command.brigadier.argument.ArgumentTypes;
 import io.papermc.paper.command.brigadier.argument.resolvers.selector.EntitySelectorArgumentResolver;
+
 import org.bukkit.ChatColor;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -32,44 +33,85 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * Команда /scan, зарегистрированная через Brigadier (Paper Commands API).
+ * Реализация команды {@code /scan}, зарегистрированной через Brigadier
+ * (Paper Commands API, актуально для Paper 1.20.6+ / 1.21.x).
  * <p>
- * Дерево аргументов:
- * scan <scanner> <display> <maxRadius> <scale> <delayTicks>
+ * Синтаксис команды:
+ * <pre>
+ *     /scan <scanner> <display> <maxRadius> <scale> <delayTicks>
+ * </pre>
+ * <ul>
+ *     <li><b>scanner</b> — сущность, вокруг которой ведётся сканирование блоков;</li>
+ *     <li><b>display</b> — сущность, рядом с которой строится уменьшенная модель;</li>
+ *     <li><b>maxRadius</b> — максимальный радиус сканирования в реальных блоках;</li>
+ *     <li><b>scale</b> — во сколько раз уменьшается модель относительно оригинала;</li>
+ *     <li><b>delayTicks</b> — интервал (в тиках) между шагами анимации скана.</li>
+ * </ul>
  * <p>
+ * Алгоритм работы: от сканера во все стороны выпускаются лучи, равномерно
+ * покрывающие сферу. На каждом тике каждый ещё "неразрешённый" луч
+ * продвигается на {@link #RAY_STEP} блоков дальше и проверяет, не уткнулся
+ * ли он в непустой блок. Как только луч находит первый непустой блок —
+ * он "разрешается" (запоминается его материал), и рядом с сущностью-дисплеем
+ * спавнится ItemDisplay в соответствующей уменьшенной точке.
  */
 public final class ScanCommand {
 
-    // ссылка на текущий выполняющийся скан, чтобы можно было отменить его
-    // при повторном вызове команды
-    private BukkitTask activeScanTask;
-
-    // Кастомное имя, которым помечаются все спавнящиеся во время скана айтем-дисплеи
+    // Метка (custom name), которой помечаются все ItemDisplay-сущности,
+    // созданные во время скана. По ней их же потом легко найти и удалить
+    // перед следующим запуском команды.
     private static final String SCAN_NAME = "scan";
 
-    // Параметры анимации скана по умолчанию
-    private static final double POINT_SPACING = 1.0;     // примерное расстояние между лучами на сфере (в отображаемых блоках)
-    private static final double RAY_STEP = 1.0;          // на сколько реальных блоков луч продвигается за тик
+    // Примерное расстояние между соседними лучами на поверхности сферы,
+    // в блоках отображаемой (уже уменьшенной) модели. Чем меньше значение —
+    // тем плотнее сетка лучей и тем детальнее скан, но тем больше сущностей
+    // будет заспавнено и тем дороже это для сервера/клиента.
+    private static final double POINT_SPACING = 1.0;
 
+    // На сколько реальных блоков каждый луч продвигается вперёд за один тик
+    // анимации. Меньшее значение делает скан более точным (не "перескакивает"
+    // тонкие препятствия), но требует больше тиков для сканирования того же радиуса.
+    private static final double RAY_STEP = 1.0;
+
+    // Ссылка на плагин нужна, чтобы планировать повторяющуюся задачу
+    // через Bukkit Scheduler (BukkitRunnable#runTaskTimer).
     private final JavaPlugin plugin;
+
+    // Ссылка на текущий выполняющийся скан. Нужна, чтобы:
+    //  1) отменить предыдущий незавершённый скан при повторном вызове команды;
+    //  2) корректно остановить скан при выключении плагина (см. Scanner#onDisable).
+    private BukkitTask activeScanTask;
 
     public ScanCommand(JavaPlugin plugin) {
         this.plugin = plugin;
     }
 
     /**
-     * Собирает дерево Brigadier-команды. Регистрируется в Scanner#onEnable через
-     * getLifecycleManager().registerEventHandler(LifecycleEvents.COMMANDS, ...).
+     * Отменяет текущий выполняющийся скан, если он ещё активен.
+     * Безопасно вызывать, даже если скан уже завершён или не запускался.
+     */
+    public void cancelActiveScan() {
+        if (activeScanTask != null && !activeScanTask.isCancelled()) {
+            activeScanTask.cancel();
+        }
+    }
+
+    /**
+     * Строит дерево Brigadier-команды {@code /scan}.
+     * Регистрируется в {@code Scanner#onEnable} через
+     * {@code getLifecycleManager().registerEventHandler(LifecycleEvents.COMMANDS, ...)}.
      */
     public LiteralCommandNode<CommandSourceStack> create() {
         return Commands.literal("scan")
+                // Команду может выполнять только тот, у кого есть право scan.admin
+                // (обычно выдаётся операторам через права-плагин или permissions.yml).
                 .requires(source -> source.getSender().hasPermission("scan.admin"))
                 .then(Commands.argument("scanner", ArgumentTypes.entity())
                         .then(Commands.argument("display", ArgumentTypes.entity())
                                 .then(Commands.argument("maxRadius", IntegerArgumentType.integer(1))
                                         .then(Commands.argument("scale", IntegerArgumentType.integer(1))
                                                 .then(Commands.argument("delayTicks", IntegerArgumentType.integer(1))
-                                                        .executes(ctx -> run(ctx, plugin))
+                                                        .executes(this::run)
                                                 )
                                         )
                                 )
@@ -78,28 +120,38 @@ public final class ScanCommand {
                 .build();
     }
 
-    private int run(CommandContext<CommandSourceStack> ctx, JavaPlugin plugin) throws CommandSyntaxException {
+    /**
+     * Точка входа при выполнении команды: разбирает аргументы, готовит
+     * общие данные (координаты, направления лучей) и запускает
+     * периодическую задачу {@link ScanTask}, которая ведёт сам скан.
+     */
+    private int run(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
         CommandSender sender = ctx.getSource().getSender();
 
+        // Аргументы-селекторы сущностей (@e, @p, конкретное имя и т.д.)
+        // резолвятся в конкретные сущности относительно источника команды.
         EntitySelectorArgumentResolver scannerResolver =
                 ctx.getArgument("scanner", EntitySelectorArgumentResolver.class);
         EntitySelectorArgumentResolver displayResolver =
                 ctx.getArgument("display", EntitySelectorArgumentResolver.class);
 
-        Entity scanner = scannerResolver.resolve(ctx.getSource()).getFirst();
-        Entity display = displayResolver.resolve(ctx.getSource()).getFirst();
+        Entity scannerEntity = scannerResolver.resolve(ctx.getSource()).getFirst();
+        Entity displayEntity = displayResolver.resolve(ctx.getSource()).getFirst();
+
         int maxRadius = IntegerArgumentType.getInteger(ctx, "maxRadius");
         int scale = IntegerArgumentType.getInteger(ctx, "scale");
         int delayTicks = IntegerArgumentType.getInteger(ctx, "delayTicks");
 
-        // Реальный скан идёт до maxRadius, но на дисплее он сжимается в scale раз —
-        // это уменьшает и видимый размер, и количество заспавненных айтем-дисплеев
-        int maxDisplayRadius = (int) Math.max(0, Math.round(maxRadius / scale));
+        // Реальный скан идёт до maxRadius, но на дисплее модель сжимается
+        // в scale раз — это одновременно уменьшает видимый размер модели
+        // и количество заспавненных ItemDisplay-сущностей.
+        int maxDisplayRadius = (int) Math.max(0, Math.round(maxRadius / (double) scale));
 
-        // Снимаем координаты один раз в момент запуска — скан идёт от этой точки,
-        // даже если сущности потом сдвинутся
-        Location scannerBase = scanner.getLocation().clone();
-        Location displayBase = display.getLocation().clone();
+        // Снимаем координаты сущностей один раз, в момент запуска команды.
+        // Скан идёт от зафиксированной точки, даже если сканер или дисплей
+        // потом сдвинутся, — иначе анимация "плыла" бы вместе с игроком.
+        Location scannerBase = scannerEntity.getLocation().clone();
+        Location displayBase = displayEntity.getLocation().clone();
         World scannerWorld = scannerBase.getWorld();
         World displayWorld = displayBase.getWorld();
 
@@ -108,112 +160,60 @@ public final class ScanCommand {
             return 0;
         }
 
-        // Фиксированный набор направлений (лучей), покрывающих сферу.
-        // Плотность считается от отображаемого радиуса — не пересчитывается на каждом тике.
-        final List<Vector3f> rayDirections = buildRayDirections(maxDisplayRadius);
+        // Фиксированный набор направлений (единичных векторов), равномерно
+        // покрывающих сферу. Плотность считается один раз, от отображаемого
+        // радиуса, а не пересчитывается на каждом тике анимации.
+        List<Vector3f> rayDirections = buildRayDirections(maxDisplayRadius);
+
+        // Если уже идёт предыдущий скан — останавливаем его перед запуском нового,
+        // чтобы две анимации не спавнили сущности одновременно.
+        cancelActiveScan();
+
+        // Удаляем все ItemDisplay-сущности, оставшиеся от предыдущего скана,
+        // прежде чем начинать спавнить новые.
+        removeScanDisplays(displayWorld);
 
         sender.sendMessage(ChatColor.GREEN + "Скан запущен!");
 
-        // отменяем предыдущий незавершённый скан, если он ещё работает
-        if (activeScanTask != null && !activeScanTask.isCancelled()) {
-            activeScanTask.cancel();
-        }
+        ScanTask task = new ScanTask(scannerBase, displayBase, displayWorld,
+                rayDirections, maxRadius, scale);
 
-        final int finalMaxRadius = maxRadius;
-        final double finalScale = scale;
-
-        // Перед обновлением удаляем все ранее заспавненные айтем-дисплеи скана
-        removeScanDisplays(displayWorld);
-
-        activeScanTask = new BukkitRunnable() {
-            double currentRealDistance = RAY_STEP;
-            final boolean[] resolved = new boolean[rayDirections.size()];
-            final Set<Long> occupiedDisplayBlocks = new HashSet<>();
-
-            // индексы лучей, которые ещё нужно проверить на текущем currentRealDistance
-            List<Integer> pending = null;
-            int pendingCursor = 0;
-
-            @Override
-            public void run() {
-                if (currentRealDistance > finalMaxRadius) {
-                    cancel();
-                    return;
-                }
-
-                // начинаем новый "проход" по текущему радиусу
-                if (pending == null) {
-                    pending = new ArrayList<>();
-                    for (int i = 0; i < rayDirections.size(); i++) {
-                        if (!resolved[i]) pending.add(i);
-                    }
-                    pendingCursor = 0;
-
-                    if (pending.isEmpty()) {
-                        cancel(); // все лучи уже нашли свои блоки — скан можно завершать досрочно
-                        return;
-                    }
-                }
-
-                while (pendingCursor < pending.size()) {
-                    int i = pending.get(pendingCursor++);
-
-                    Vector3f dir = rayDirections.get(i);
-                    double dx = dir.x * currentRealDistance;
-                    double dy = dir.y * currentRealDistance;
-                    double dz = dir.z * currentRealDistance;
-
-                    if (trySpawnFirstHit(scannerBase, displayBase, displayWorld, dx, dy, dz,
-                            finalScale, occupiedDisplayBlocks)) {
-                        resolved[i] = true;
-                    }
-                }
-
-                // проход по текущему радиусу закончен — переходим к следующему
-                if (pendingCursor >= pending.size()) {
-                    pending = null;
-                    currentRealDistance += RAY_STEP;
-                }
-            }
-        }.runTaskTimer(plugin, 0L, delayTicks);
+        activeScanTask = task.runTaskTimer(plugin, 0L, delayTicks);
 
         return Command.SINGLE_SUCCESS;
     }
 
-    private static SuggestionProvider<CommandSourceStack> numberSuggestions(String... values) {
-        return (ctx, builder) -> {
-            String remaining = builder.getRemaining();
-            for (String value : values) {
-                if (value.startsWith(remaining)) {
-                    builder.suggest(value);
-                }
-            }
-            return builder.buildFuture();
-        };
-    }
-
     /**
-     * Строит единичные (нормированные) направления лучей, равномерно покрывающие сферу,
-     * с плотностью, рассчитанной под конечный отображаемый радиус.
-     * Точки распределяются по широте (сверху вниз) и долготе (по кругу).
+     * Строит единичные (нормированные) направления лучей, равномерно
+     * покрывающие сферу, с плотностью, рассчитанной под конечный
+     * отображаемый радиус. Точки распределяются кольцами по широте
+     * (сверху вниз), а внутри каждого кольца — равномерно по долготе.
+     *
+     * @param maxDisplayRadius итоговый (уже уменьшенный scale-ом) радиус модели
      */
     private List<Vector3f> buildRayDirections(int maxDisplayRadius) {
         List<Vector3f> directions = new ArrayList<>();
 
         if (maxDisplayRadius <= 0) {
-            // Особый случай: сканируем только саму точку сканера
+            // Особый случай: модель настолько маленькая, что сканируем
+            // только саму точку сканера, без построения сферы направлений.
             directions.add(new Vector3f(0f, 0f, 0f));
             return directions;
         }
 
+        // Количество "широтных" колец от полюса до полюса. Чем больше
+        // радиус — тем больше колец нужно, чтобы сохранить плотность POINT_SPACING.
         int latitudeRings = Math.max(4, (int) Math.round((Math.PI * maxDisplayRadius) / POINT_SPACING));
 
         for (int lat = 0; lat <= latitudeRings; lat++) {
-            // phi: 0 — верхний полюс, PI — нижний полюс
+            // phi — угол от верхнего полюса (0) до нижнего полюса (PI).
             double phi = (Math.PI * lat) / latitudeRings;
-            double ringRadiusUnit = Math.sin(phi); // единичный (нормированный) радиус кольца
-            double y = Math.cos(phi);
+            double ringRadiusUnit = Math.sin(phi); // радиус текущего кольца (в единичной сфере)
+            double y = Math.cos(phi);              // высота текущего кольца
 
+            // Число точек в кольце пропорционально его реальной длине окружности,
+            // чтобы плотность точек была примерно одинаковой по всей сфере
+            // (у полюсов колец меньше, у экватора — больше).
             int pointsInRing = Math.max(1,
                     (int) Math.round((2 * Math.PI * (ringRadiusUnit * maxDisplayRadius)) / POINT_SPACING));
 
@@ -229,78 +229,172 @@ public final class ScanCommand {
     }
 
     /**
-     * Проверяет реальный блок на расстоянии (dx, dy, dz) от сканера. Если это не воздух
-     * и у блока есть предметная форма — спавнит айтем-дисплей в сжатой (dx/scale, dy/scale,
-     * dz/scale) точке относительно дисплея и возвращает true (луч "нашёл" свой первый блок).
-     * Если блока нет — возвращает false, и луч на следующем тике продвинется дальше.
-     * Если после сжатия точка попадает в уже занятый другим лучом блок дисплея — луч всё
-     * равно считается "разрешённым" (нашёл блок), но повторный айтем-дисплей не спавнится,
-     * чтобы не создавать наложенные друг на друга сущности.
-     */
-    private boolean trySpawnFirstHit(Location scannerBase, Location displayBase, World displayWorld,
-                                     double dx, double dy, double dz, double scale,
-                                     Set<Long> occupiedDisplayBlocks) {
-        Location scanPointLoc = scannerBase.clone().add(dx, dy, dz);
-        Block block = scanPointLoc.getBlock();
-        Material material = block.getType();
-
-        if (material.isAir() || !material.isItem()) {
-            return false; // ничего не нашли — луч летит дальше
-        }
-
-        Block spawnBlock = displayBase.clone().add(dx / scale, dy / scale, dz / scale).getBlock();
-        long blockKey = blockKey(spawnBlock);
-
-        if (!occupiedDisplayBlocks.add(blockKey)) {
-            return true; // блок дисплея уже занят другим лучом — луч разрешён, но без дубликата
-        }
-
-        Location spawnLoc = spawnBlock.getLocation().add(0.5, 0.5, 0.5); // центрируем по блоку
-
-        ItemStack itemStack = new ItemStack(material);
-
-        displayWorld.spawn(spawnLoc, ItemDisplay.class, entity -> {
-            entity.setItemStack(itemStack);
-            entity.setCustomName(SCAN_NAME);
-            entity.setCustomNameVisible(false);
-
-            // Тень ничего не добавляет к результату скана, но заметно дороже для клиента —
-            // отключаем её полностью
-            entity.setShadowRadius(0f);
-            entity.setShadowStrength(0f);
-
-            Transformation transformation = new Transformation(
-                    new Vector3f(0f, 0f, 0f),          // translation
-                    new AxisAngle4f(0f, 0f, 0f, 1f),   // left rotation
-                    new Vector3f(2f, 2f, 2f),          // scale — увеличено до размеров блока
-                    new AxisAngle4f(0f, 0f, 0f, 1f)    // right rotation
-            );
-            entity.setTransformation(transformation);
-            entity.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.FIXED);
-        });
-
-        return true;
-    }
-
-    /**
-     * Упаковывает координаты блока в один long — для быстрого хранения в HashSet
-     * без создания лишних объектов Location/Block на каждое сравнение.
-     */
-    private long blockKey(Block block) {
-        long x = block.getX() & 0x3FFFFFFL; // 26 бит
-        long y = block.getY() & 0xFFFL;      // 12 бит (с запасом на высоту мира)
-        long z = block.getZ() & 0x3FFFFFFL; // 26 бит
-        return (x << 38) | (y << 26) | z;
-    }
-
-    /**
-     * Удаляет все айтем-дисплеи, помеченные тегом скана, в указанном мире.
+     * Удаляет все ItemDisplay-сущности, помеченные тегом скана
+     * ({@link #SCAN_NAME}), в указанном мире. Вызывается перед стартом
+     * нового скана, чтобы старая модель не оставалась висеть рядом с новой.
      */
     private void removeScanDisplays(World world) {
         for (ItemDisplay display : world.getEntitiesByClass(ItemDisplay.class)) {
             if (SCAN_NAME.equals(display.getCustomName())) {
                 display.remove();
             }
+        }
+    }
+
+    /**
+     * Упаковывает координаты блока в один {@code long} — для быстрого
+     * хранения посещённых блоков дисплея в {@link HashSet} без создания
+     * лишних объектов {@link Location}/{@link Block} на каждое сравнение.
+     */
+    private static long blockKey(Block block) {
+        long x = block.getX() & 0x3FFFFFFL; // 26 бит на координату X
+        long y = block.getY() & 0xFFFL;     // 12 бит на координату Y (с запасом на высоту мира)
+        long z = block.getZ() & 0x3FFFFFFL; // 26 бит на координату Z
+        return (x << 38) | (y << 26) | z;
+    }
+
+    /**
+     * Периодическая задача, реализующая пошаговую анимацию скана.
+     * <p>
+     * На каждом тике (с интервалом delayTicks) все ещё "неразрешённые" лучи
+     * продвигаются на {@link #RAY_STEP} блоков дальше от сканера и проверяют,
+     * не наткнулись ли они на непустой блок. Как только все лучи разрешены
+     * или достигнут maxRadius — задача сама себя отменяет.
+     */
+    private static final class ScanTask extends BukkitRunnable {
+
+        private final Location scannerBase;
+        private final Location displayBase;
+        private final World displayWorld;
+        private final List<Vector3f> rayDirections;
+        private final int maxRadius;
+        private final int scale;
+
+        // Текущее реальное расстояние (в блоках) от сканера, на котором
+        // проверяются все ещё активные лучи на этом шаге анимации.
+        private double currentRealDistance = RAY_STEP;
+
+        // Отмечает, какие лучи уже нашли свой первый непустой блок
+        // и больше не нуждаются в проверке на следующих шагах.
+        private final boolean[] resolved;
+
+        // Блоки дисплея, в которых уже был заспавнен ItemDisplay на этом скане —
+        // нужно, чтобы два разных луча, попавших в один и тот же блок модели
+        // после сжатия, не создавали два наложенных друг на друга дисплея.
+        private final Set<Long> occupiedDisplayBlocks = new HashSet<>();
+
+        // Список индексов лучей, которые ещё нужно проверить на текущем
+        // currentRealDistance, и позиция курсора в этом списке.
+        // Пересобирается заново на каждом новом радиусе.
+        private List<Integer> pending;
+        private int pendingCursor;
+
+        ScanTask(Location scannerBase, Location displayBase, World displayWorld,
+                 List<Vector3f> rayDirections, int maxRadius, int scale) {
+            this.scannerBase = scannerBase;
+            this.displayBase = displayBase;
+            this.displayWorld = displayWorld;
+            this.rayDirections = rayDirections;
+            this.maxRadius = maxRadius;
+            this.scale = scale;
+            this.resolved = new boolean[rayDirections.size()];
+        }
+
+        @Override
+        public void run() {
+            if (currentRealDistance > maxRadius) {
+                cancel(); // достигли максимального радиуса — скан завершён
+                return;
+            }
+
+            // Начинаем новый "проход" по текущему радиусу: собираем список
+            // ещё не разрешённых лучей, которые нужно проверить на этом шаге.
+            if (pending == null) {
+                pending = new ArrayList<>();
+                for (int i = 0; i < rayDirections.size(); i++) {
+                    if (!resolved[i]) {
+                        pending.add(i);
+                    }
+                }
+                pendingCursor = 0;
+
+                if (pending.isEmpty()) {
+                    cancel(); // все лучи уже нашли свои блоки — можно завершать досрочно
+                    return;
+                }
+            }
+
+            // Проверяем все оставшиеся на этом шаге лучи за один вызов run(),
+            // чтобы анимация продвигалась ровно на один радиус за один тик,
+            // независимо от того, сколько лучей осталось активными.
+            while (pendingCursor < pending.size()) {
+                int rayIndex = pending.get(pendingCursor++);
+                Vector3f direction = rayDirections.get(rayIndex);
+
+                double dx = direction.x * currentRealDistance;
+                double dy = direction.y * currentRealDistance;
+                double dz = direction.z * currentRealDistance;
+
+                if (trySpawnFirstHit(dx, dy, dz)) {
+                    resolved[rayIndex] = true;
+                }
+            }
+
+            // Проход по текущему радиусу закончен — переходим к следующему.
+            pending = null;
+            currentRealDistance += RAY_STEP;
+        }
+
+        /**
+         * Проверяет реальный блок на смещении (dx, dy, dz) от сканера.
+         * Если это не воздух и у блока есть предметная форма — спавнит
+         * ItemDisplay в сжатой (dx/scale, dy/scale, dz/scale) точке
+         * относительно дисплея и возвращает {@code true} (луч "нашёл"
+         * свой первый блок). Если подходящего блока нет — возвращает
+         * {@code false}, и луч на следующем тике продвинется дальше.
+         */
+        private boolean trySpawnFirstHit(double dx, double dy, double dz) {
+            Location scanPoint = scannerBase.clone().add(dx, dy, dz);
+            Block block = scanPoint.getBlock();
+            Material material = block.getType();
+
+            if (material.isAir() || !material.isItem()) {
+                return false; // ничего не нашли — луч летит дальше
+            }
+
+            Block spawnBlock = displayBase.clone().add(dx / scale, dy / scale, dz / scale).getBlock();
+            long blockKey = blockKey(spawnBlock);
+
+            if (!occupiedDisplayBlocks.add(blockKey)) {
+                // Блок модели уже занят другим лучом — считаем луч разрешённым,
+                // но не спавним дубликат сущности поверх уже существующей.
+                return true;
+            }
+
+            Location spawnLocation = spawnBlock.getLocation().add(0.5, 0.5, 0.5); // центр блока
+            ItemStack itemStack = new ItemStack(material);
+
+            displayWorld.spawn(spawnLocation, ItemDisplay.class, entity -> {
+                entity.setItemStack(itemStack);
+                entity.setCustomName(SCAN_NAME);
+                entity.setCustomNameVisible(false);
+
+                // Тень ничего не добавляет к результату скана, но заметно дороже
+                // для клиента при большом количестве сущностей — отключаем её.
+                entity.setShadowRadius(0f);
+                entity.setShadowStrength(0f);
+
+                Transformation transformation = new Transformation(
+                        new Vector3f(0f, 0f, 0f),        // translation — без смещения
+                        new AxisAngle4f(0f, 0f, 0f, 1f),  // left rotation — без поворота
+                        new Vector3f(2f, 2f, 2f),         // scale — увеличено до размеров блока
+                        new AxisAngle4f(0f, 0f, 0f, 1f)   // right rotation — без поворота
+                );
+                entity.setTransformation(transformation);
+                entity.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.FIXED);
+            });
+
+            return true;
         }
     }
 }
