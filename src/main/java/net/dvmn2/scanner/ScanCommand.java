@@ -64,6 +64,7 @@ public final class ScanCommand {
      */
     public LiteralCommandNode<CommandSourceStack> create() {
         return Commands.literal("scan")
+                .requires(source -> source.getSender().hasPermission("scan.admin"))
                 .then(Commands.argument("scanner", ArgumentTypes.entity())
                         .then(Commands.argument("display", ArgumentTypes.entity())
                                 .then(Commands.argument("maxRadius", IntegerArgumentType.integer(1))
@@ -80,11 +81,6 @@ public final class ScanCommand {
 
     private int run(CommandContext<CommandSourceStack> ctx, JavaPlugin plugin) throws CommandSyntaxException {
         CommandSender sender = ctx.getSource().getSender();
-
-        if (!sender.hasPermission("scan.admin")) {
-            sender.sendMessage(ChatColor.RED + "У вас нет прав на использование этой команды.");
-            return 0;
-        }
 
         EntitySelectorArgumentResolver scannerResolver =
                 ctx.getArgument("scanner", EntitySelectorArgumentResolver.class);

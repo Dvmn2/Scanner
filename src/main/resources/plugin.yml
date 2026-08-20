@@ -8,11 +8,6 @@ load: POSTWORLD
 
 authors: [ DVMN2 ]
 
-commands:
-  scan:
-    description: Сканирует блок под сканером и создаёт item-display
-    usage: /scan <энтити-сканер> <энтити-дисплей> [макс.радиус] [сжатие] [задержка-тиков]
-
 permissions:
   scan.admin:
     description: Доступ к сканированию
