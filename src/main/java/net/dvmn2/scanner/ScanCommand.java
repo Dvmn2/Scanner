@@ -1,18 +1,21 @@
 package net.dvmn2.scanner;
 
-import net.dvmn2.scanner.managers.SelectorChecker;
-import net.dvmn2.scanner.managers.SelectorParser;
-import net.dvmn2.scanner.managers.SelectorTab;
-
+import com.mojang.brigadier.Command;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.context.CommandContext;
+import com.mojang.brigadier.exceptions.CommandSyntaxException;
+import com.mojang.brigadier.suggestion.SuggestionProvider;
+import com.mojang.brigadier.tree.LiteralCommandNode;
+import io.papermc.paper.command.brigadier.CommandSourceStack;
+import io.papermc.paper.command.brigadier.Commands;
+import io.papermc.paper.command.brigadier.argument.ArgumentTypes;
+import io.papermc.paper.command.brigadier.argument.resolvers.selector.EntitySelectorArgumentResolver;
 import org.bukkit.ChatColor;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
-import org.bukkit.command.Command;
-import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
-import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.ItemDisplay;
 import org.bukkit.inventory.ItemStack;
@@ -23,9 +26,19 @@ import org.bukkit.util.Transformation;
 import org.joml.AxisAngle4f;
 import org.joml.Vector3f;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
-public final class ScanCommand implements CommandExecutor, TabCompleter {
+/**
+ * Команда /scan, зарегистрированная через Brigadier (Paper Commands API).
+ * <p>
+ * Дерево аргументов:
+ * scan <scanner> <display> <maxRadius> <scale> <delayTicks>
+ * <p>
+ */
+public final class ScanCommand {
 
     // ссылка на текущий выполняющийся скан, чтобы можно было отменить его
     // при повторном вызове команды
@@ -34,10 +47,7 @@ public final class ScanCommand implements CommandExecutor, TabCompleter {
     // Кастомное имя, которым помечаются все спавнящиеся во время скана айтем-дисплеи
     private static final String SCAN_NAME = "scan";
 
-    // Параметры анимации скана по умолчанию (можно переопределить аргументами команды)
-    private static final int DEFAULT_MAX_RADIUS = 10;    // максимальный радиус скана в реальном мире (в блоках)
-    private static final double DEFAULT_SCALE = 1.0;     // во сколько раз сжимается отображение (1 = без сжатия)
-    private static final long DEFAULT_DELAY_TICKS = 10L; // задержка между шагами (тиков)
+    // Параметры анимации скана по умолчанию
     private static final double POINT_SPACING = 1.0;     // примерное расстояние между лучами на сфере (в отображаемых блоках)
     private static final double RAY_STEP = 1.0;          // на сколько реальных блоков луч продвигается за тик
     private static final int RAYS_PER_TICK = 1500;       // сколько лучей максимум проверяем за один тик
@@ -48,69 +58,44 @@ public final class ScanCommand implements CommandExecutor, TabCompleter {
         this.plugin = plugin;
     }
 
-    @Override
-    public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+    /**
+     * Собирает дерево Brigadier-команды. Регистрируется в Scanner#onEnable через
+     * getLifecycleManager().registerEventHandler(LifecycleEvents.COMMANDS, ...).
+     */
+    public LiteralCommandNode<CommandSourceStack> create() {
+        return Commands.literal("scan")
+                .then(Commands.argument("scanner", ArgumentTypes.entity())
+                        .then(Commands.argument("display", ArgumentTypes.entity())
+                                .then(Commands.argument("maxRadius", IntegerArgumentType.integer(1))
+                                        .then(Commands.argument("scale", IntegerArgumentType.integer(1))
+                                                .then(Commands.argument("delayTicks", IntegerArgumentType.integer(1))
+                                                        .executes(ctx -> run(ctx, plugin))
+                                                )
+                                        )
+                                )
+                        )
+                )
+                .build();
+    }
+
+    private int run(CommandContext<CommandSourceStack> ctx, JavaPlugin plugin) throws CommandSyntaxException {
+        CommandSender sender = ctx.getSource().getSender();
+
         if (!sender.hasPermission("scan.admin")) {
             sender.sendMessage(ChatColor.RED + "У вас нет прав на использование этой команды.");
-            return true;
+            return 0;
         }
 
-        if (args.length < 2) {
-            sender.sendMessage(ChatColor.RED + "Использование: /scan <энтити-сканер> <энтити-дисплей> [макс.радиус] [сжатие] [задержка-тиков]");
-            return true;
-        }
+        EntitySelectorArgumentResolver scannerResolver =
+                ctx.getArgument("scanner", EntitySelectorArgumentResolver.class);
+        EntitySelectorArgumentResolver displayResolver =
+                ctx.getArgument("display", EntitySelectorArgumentResolver.class);
 
-        // Резолвим селекторы в энтити
-        List<Entity> scannerTargets = SelectorParser.parse(sender, args[0]);
-
-        if (scannerTargets.isEmpty()) {
-            sender.sendMessage(ChatColor.RED + "Сканер-энтити не найден по селектору: " + args[0]);
-            return true;
-        }
-
-        if (!SelectorChecker.isMatch(scannerTargets, 1)) {
-            sender.sendMessage(ChatColor.RED + "Сканер-энтити должен быть один: " + args[0]);
-            return true;
-        }
-
-        Entity scannerEntity = scannerTargets.get(0);
-
-        List<Entity> displayTargets = SelectorParser.parse(sender, args[1]);
-
-        if (displayTargets.isEmpty()) {
-            sender.sendMessage(ChatColor.RED + "Дисплей-энтити не найден по селектору: " + args[1]);
-            return true;
-        }
-
-        if (!SelectorChecker.isMatch(displayTargets, 1)) {
-            sender.sendMessage(ChatColor.RED + "Дисплей-энтити должен быть один: " + args[1]);
-            return true;
-        }
-
-        Entity displayEntity = displayTargets.get(0);
-
-        int maxRadius = DEFAULT_MAX_RADIUS;
-        double scale = DEFAULT_SCALE;
-        long delayTicks = DEFAULT_DELAY_TICKS;
-
-        try {
-            if (args.length >= 3) maxRadius = Integer.parseInt(args[2]);
-            if (args.length >= 4) scale = Double.parseDouble(args[3]);
-            if (args.length >= 5) delayTicks = Long.parseLong(args[4]);
-        } catch (NumberFormatException e) {
-            sender.sendMessage(ChatColor.RED + "Макс.радиус, сжатие и задержка должны быть числами.");
-            return true;
-        }
-
-        if (scale <= 0) {
-            sender.sendMessage(ChatColor.RED + "Сжатие должно быть больше 0.");
-            return true;
-        }
-
-        if (maxRadius < 1) {
-            sender.sendMessage(ChatColor.RED + "Макс.радиус должен быть не меньше 1.");
-            return true;
-        }
+        Entity scanner = scannerResolver.resolve(ctx.getSource()).getFirst();
+        Entity display = displayResolver.resolve(ctx.getSource()).getFirst();
+        int maxRadius = IntegerArgumentType.getInteger(ctx, "maxRadius");
+        int scale = IntegerArgumentType.getInteger(ctx, "scale");
+        int delayTicks = IntegerArgumentType.getInteger(ctx, "delayTicks");
 
         // Реальный скан идёт до maxRadius, но на дисплее он сжимается в scale раз —
         // это уменьшает и видимый размер, и количество заспавненных айтем-дисплеев
@@ -118,14 +103,14 @@ public final class ScanCommand implements CommandExecutor, TabCompleter {
 
         // Снимаем координаты один раз в момент запуска — скан идёт от этой точки,
         // даже если сущности потом сдвинутся
-        Location scannerBase = scannerEntity.getLocation().clone();
-        Location displayBase = displayEntity.getLocation().clone();
+        Location scannerBase = scanner.getLocation().clone();
+        Location displayBase = display.getLocation().clone();
         World scannerWorld = scannerBase.getWorld();
         World displayWorld = displayBase.getWorld();
 
         if (scannerWorld == null || displayWorld == null) {
             sender.sendMessage(ChatColor.RED + "Не удалось определить мир сущностей.");
-            return true;
+            return 0;
         }
 
         // Фиксированный набор направлений (лучей), покрывающих сферу.
@@ -199,27 +184,19 @@ public final class ScanCommand implements CommandExecutor, TabCompleter {
             }
         }.runTaskTimer(plugin, 0L, delayTicks);
 
-        return true;
+        return Command.SINGLE_SUCCESS;
     }
 
-    @Override
-    public List<String> onTabComplete(CommandSender sender, Command cmd, String label, String[] args) {
-        if (args.length == 1) {
-            return SelectorTab.getSelectors();
-        }
-        if (args.length == 2) {
-            return SelectorTab.getSelectors();
-        }
-        if (args.length == 3) {
-            return Arrays.asList("10", "15", "20", "30", "50", "100", "150");
-        }
-        if (args.length == 4) {
-            return Arrays.asList("1", "2", "4", "6", "8");
-        }
-        if (args.length == 5) {
-            return Arrays.asList("1", "2", "4", "6", "8");
-        }
-        return Collections.emptyList();
+    private static SuggestionProvider<CommandSourceStack> numberSuggestions(String... values) {
+        return (ctx, builder) -> {
+            String remaining = builder.getRemaining();
+            for (String value : values) {
+                if (value.startsWith(remaining)) {
+                    builder.suggest(value);
+                }
+            }
+            return builder.buildFuture();
+        };
     }
 
     /**
