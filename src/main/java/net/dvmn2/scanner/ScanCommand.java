@@ -50,7 +50,6 @@ public final class ScanCommand {
     // Параметры анимации скана по умолчанию
     private static final double POINT_SPACING = 1.0;     // примерное расстояние между лучами на сфере (в отображаемых блоках)
     private static final double RAY_STEP = 1.0;          // на сколько реальных блоков луч продвигается за тик
-    private static final int RAYS_PER_TICK = 1500;       // сколько лучей максимум проверяем за один тик
 
     private final JavaPlugin plugin;
 
@@ -156,10 +155,8 @@ public final class ScanCommand {
                     }
                 }
 
-                int processed = 0;
-                while (pendingCursor < pending.size() && processed < RAYS_PER_TICK) {
+                while (pendingCursor < pending.size()) {
                     int i = pending.get(pendingCursor++);
-                    processed++;
 
                     Vector3f dir = rayDirections.get(i);
                     double dx = dir.x * currentRealDistance;
