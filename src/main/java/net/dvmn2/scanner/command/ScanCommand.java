@@ -62,6 +62,11 @@ public final class ScanCommand {
     //  2) корректно остановить скан при выключении плагина (см. Scanner#onDisable).
     private BukkitTask activeScanTask;
 
+    private static final int DEFAULT_MAX_RADIUS = 10;
+    private static final int DEFAULT_SCANNER_SCALE = 1;
+    private static final int DEFAULT_DISPLAY_SCALE = 1;
+    private static final int DEFAULT_DELAY_TICKS = 1;
+
     public ScanCommand(JavaPlugin plugin) {
         this.plugin = plugin;
     }
@@ -88,11 +93,30 @@ public final class ScanCommand {
                 .requires(source -> source.getSender().hasPermission("scan.admin"))
                 .then(Commands.argument("scanner", ArgumentTypes.entity())
                         .then(Commands.argument("display", ArgumentTypes.entity())
+                                .executes(ctx -> run(ctx,
+                                        DEFAULT_MAX_RADIUS, DEFAULT_SCANNER_SCALE,
+                                        DEFAULT_DISPLAY_SCALE, DEFAULT_DELAY_TICKS))
                                 .then(Commands.argument("maxRadius", IntegerArgumentType.integer(1))
+                                        .executes(ctx -> run(ctx,
+                                                IntegerArgumentType.getInteger(ctx, "maxRadius"),
+                                                DEFAULT_SCANNER_SCALE, DEFAULT_DISPLAY_SCALE, DEFAULT_DELAY_TICKS))
                                         .then(Commands.argument("scannerScale", IntegerArgumentType.integer(1))
+                                                .executes(ctx -> run(ctx,
+                                                        IntegerArgumentType.getInteger(ctx, "maxRadius"),
+                                                        IntegerArgumentType.getInteger(ctx, "scannerScale"),
+                                                        DEFAULT_DISPLAY_SCALE, DEFAULT_DELAY_TICKS))
                                                 .then(Commands.argument("displayScale", IntegerArgumentType.integer(1))
+                                                        .executes(ctx -> run(ctx,
+                                                                IntegerArgumentType.getInteger(ctx, "maxRadius"),
+                                                                IntegerArgumentType.getInteger(ctx, "scannerScale"),
+                                                                IntegerArgumentType.getInteger(ctx, "displayScale"),
+                                                                DEFAULT_DELAY_TICKS))
                                                         .then(Commands.argument("delayTicks", IntegerArgumentType.integer(1))
-                                                                .executes(this::run)
+                                                                .executes(ctx -> run(ctx,
+                                                                        IntegerArgumentType.getInteger(ctx, "maxRadius"),
+                                                                        IntegerArgumentType.getInteger(ctx, "scannerScale"),
+                                                                        IntegerArgumentType.getInteger(ctx, "displayScale"),
+                                                                        IntegerArgumentType.getInteger(ctx, "delayTicks")))
                                                         )
                                                 )
                                         )
@@ -107,11 +131,10 @@ public final class ScanCommand {
      * общие данные (координаты, направления лучей) и запускает
      * периодическую задачу {@link ScanTask}, которая ведёт сам скан.
      */
-    private int run(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
+    private int run(CommandContext<CommandSourceStack> ctx,
+                    int maxRadius, int scannerScale, int displayScale, int delayTicks) throws CommandSyntaxException {
         CommandSender sender = ctx.getSource().getSender();
 
-        // Аргументы-селекторы сущностей (@e, @p, конкретное имя и т.д.)
-        // резолвятся в конкретные сущности относительно источника команды.
         EntitySelectorArgumentResolver scannerResolver =
                 ctx.getArgument("scanner", EntitySelectorArgumentResolver.class);
         EntitySelectorArgumentResolver displayResolver =
@@ -119,11 +142,6 @@ public final class ScanCommand {
 
         Entity scannerEntity = scannerResolver.resolve(ctx.getSource()).getFirst();
         Entity displayEntity = displayResolver.resolve(ctx.getSource()).getFirst();
-
-        int maxRadius = IntegerArgumentType.getInteger(ctx, "maxRadius");
-        int scannerScale = IntegerArgumentType.getInteger(ctx, "scannerScale");
-        int displayScale = IntegerArgumentType.getInteger(ctx, "displayScale");
-        int delayTicks = IntegerArgumentType.getInteger(ctx, "delayTicks");
 
         // Реальный скан идёт до maxRadius, но на дисплее модель сжимается
         // в scannerScale раз — это одновременно уменьшает видимый размер модели
