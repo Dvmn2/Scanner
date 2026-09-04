@@ -38,13 +38,18 @@ import java.util.Set;
  * <p>
  * Синтаксис команды:
  * <pre>
- *     /scan <scanner> <display> <maxRadius> <scale> <delayTicks>
+ *     /scan <scanner> <display> <maxRadius> <scannerScale> <displayScale> <delayTicks>
  * </pre>
  * <ul>
  *     <li><b>scanner</b> — сущность, вокруг которой ведётся сканирование блоков;</li>
  *     <li><b>display</b> — сущность, рядом с которой строится уменьшенная модель;</li>
  *     <li><b>maxRadius</b> — максимальный радиус сканирования в реальных блоках;</li>
- *     <li><b>scale</b> — во сколько раз уменьшается модель относительно оригинала;</li>
+ *     <li><b>scannerScale</b> — во сколько раз уменьшается модель относительно оригинала
+ *         (переносит реальные координаты блоков в координаты дисплея);</li>
+ *     <li><b>displayScale</b> — во сколько раз повышается плотность ItemDisplay-сущностей
+ *         за счёт их уменьшения: {@code displayScale = 1} — один item-display на блок модели,
+ *         {@code displayScale = 2} — модель делится на подсетку 2×2×2 (8 item-display на блок),
+ *         {@code displayScale = N} — подсетка N×N×N (N³ item-display на блок);</li>
  *     <li><b>delayTicks</b> — интервал (в тиках) между шагами анимации скана.</li>
  * </ul>
  * <p>
@@ -109,9 +114,11 @@ public final class ScanCommand {
                 .then(Commands.argument("scanner", ArgumentTypes.entity())
                         .then(Commands.argument("display", ArgumentTypes.entity())
                                 .then(Commands.argument("maxRadius", IntegerArgumentType.integer(1))
-                                        .then(Commands.argument("scale", IntegerArgumentType.integer(1))
-                                                .then(Commands.argument("delayTicks", IntegerArgumentType.integer(1))
-                                                        .executes(this::run)
+                                        .then(Commands.argument("scannerScale", IntegerArgumentType.integer(1))
+                                                .then(Commands.argument("displayScale", IntegerArgumentType.integer(1))
+                                                        .then(Commands.argument("delayTicks", IntegerArgumentType.integer(1))
+                                                                .executes(this::run)
+                                                        )
                                                 )
                                         )
                                 )
@@ -139,13 +146,14 @@ public final class ScanCommand {
         Entity displayEntity = displayResolver.resolve(ctx.getSource()).getFirst();
 
         int maxRadius = IntegerArgumentType.getInteger(ctx, "maxRadius");
-        int scale = IntegerArgumentType.getInteger(ctx, "scale");
+        int scannerScale = IntegerArgumentType.getInteger(ctx, "scannerScale");
+        int displayScale = IntegerArgumentType.getInteger(ctx, "displayScale");
         int delayTicks = IntegerArgumentType.getInteger(ctx, "delayTicks");
 
         // Реальный скан идёт до maxRadius, но на дисплее модель сжимается
-        // в scale раз — это одновременно уменьшает видимый размер модели
+        // в scannerScale раз — это одновременно уменьшает видимый размер модели
         // и количество заспавненных ItemDisplay-сущностей.
-        int maxDisplayRadius = (int) Math.max(0, Math.round(maxRadius / (double) scale));
+        int maxDisplayRadius = (int) Math.max(0, Math.round(maxRadius / (double) scannerScale));
 
         // Снимаем координаты сущностей один раз, в момент запуска команды.
         // Скан идёт от зафиксированной точки, даже если сканер или дисплей
@@ -163,7 +171,11 @@ public final class ScanCommand {
         // Фиксированный набор направлений (единичных векторов), равномерно
         // покрывающих сферу. Плотность считается один раз, от отображаемого
         // радиуса, а не пересчитывается на каждом тике анимации.
-        List<Vector3f> rayDirections = buildRayDirections(maxDisplayRadius);
+        // Умножаем радиус на displayScale, чтобы плотность лучей была
+        // достаточной для заполнения более мелкой подсетки item-display'ев
+        // (иначе несколько лучей продолжали бы попадать в одну и ту же
+        // укрупнённую ячейку, и displayScale не давал бы видимого эффекта).
+        List<Vector3f> rayDirections = buildRayDirections(maxDisplayRadius * displayScale);
 
         // Если уже идёт предыдущий скан — останавливаем его перед запуском нового,
         // чтобы две анимации не спавнили сущности одновременно.
@@ -176,7 +188,7 @@ public final class ScanCommand {
         sender.sendMessage(ChatColor.GREEN + "Скан запущен!");
 
         ScanTask task = new ScanTask(scannerBase, displayBase, displayWorld,
-                rayDirections, maxRadius, scale);
+                rayDirections, maxRadius, scannerScale, displayScale);
 
         activeScanTask = task.runTaskTimer(plugin, 0L, delayTicks);
 
@@ -189,7 +201,7 @@ public final class ScanCommand {
      * отображаемый радиус. Точки распределяются кольцами по широте
      * (сверху вниз), а внутри каждого кольца — равномерно по долготе.
      *
-     * @param maxDisplayRadius итоговый (уже уменьшенный scale-ом) радиус модели
+     * @param maxDisplayRadius итоговый (уже уменьшенный scannerScale-ом) радиус модели
      */
     private List<Vector3f> buildRayDirections(int maxDisplayRadius) {
         List<Vector3f> directions = new ArrayList<>();
@@ -242,15 +254,20 @@ public final class ScanCommand {
     }
 
     /**
-     * Упаковывает координаты блока в один {@code long} — для быстрого
-     * хранения посещённых блоков дисплея в {@link HashSet} без создания
-     * лишних объектов {@link Location}/{@link Block} на каждое сравнение.
+     * Упаковывает координаты ячейки подсетки дисплея (уже с учётом
+     * {@code displayScale}) в один {@code long} — для быстрого хранения
+     * посещённых ячеек в {@link HashSet} без создания лишних объектов
+     * {@link Location}/{@link Block} на каждое сравнение.
+     * <p>
+     * В отличие от прежней версии (хранившей мировые координаты блока),
+     * ячейки считаются от точки дисплея, поэтому 21 бита на координату
+     * с запасом хватает для любого разумного радиуса скана и displayScale.
      */
-    private static long blockKey(Block block) {
-        long x = block.getX() & 0x3FFFFFFL; // 26 бит на координату X
-        long y = block.getY() & 0xFFFL;     // 12 бит на координату Y (с запасом на высоту мира)
-        long z = block.getZ() & 0x3FFFFFFL; // 26 бит на координату Z
-        return (x << 38) | (y << 26) | z;
+    private static long cellKey(long cellX, long cellY, long cellZ) {
+        long x = cellX & 0x1FFFFFL; // 21 бит на координату X
+        long y = cellY & 0x1FFFFFL; // 21 бит на координату Y
+        long z = cellZ & 0x1FFFFFL; // 21 бит на координату Z
+        return (x << 42) | (y << 21) | z;
     }
 
     /**
@@ -268,7 +285,12 @@ public final class ScanCommand {
         private final World displayWorld;
         private final List<Vector3f> rayDirections;
         private final int maxRadius;
-        private final int scale;
+        private final int scannerScale;
+
+        // Во сколько раз повышается плотность item-display'ев за счёт их
+        // уменьшения: модель делится на подсетку displayScale³ ячеек на
+        // каждый исходный блок дисплея (см. {@link #trySpawnFirstHit}).
+        private final int displayScale;
 
         // Текущее реальное расстояние (в блоках) от сканера, на котором
         // проверяются все ещё активные лучи на этом шаге анимации.
@@ -278,10 +300,11 @@ public final class ScanCommand {
         // и больше не нуждаются в проверке на следующих шагах.
         private final boolean[] resolved;
 
-        // Блоки дисплея, в которых уже был заспавнен ItemDisplay на этом скане —
-        // нужно, чтобы два разных луча, попавших в один и тот же блок модели
-        // после сжатия, не создавали два наложенных друг на друга дисплея.
-        private final Set<Long> occupiedDisplayBlocks = new HashSet<>();
+        // Ячейки подсетки дисплея (с учётом displayScale), в которых уже был
+        // заспавнен ItemDisplay на этом скане — нужно, чтобы два разных луча,
+        // попавших в одну и ту же ячейку модели после сжатия, не создавали
+        // два наложенных друг на друга дисплея.
+        private final Set<Long> occupiedDisplayCells = new HashSet<>();
 
         // Список индексов лучей, которые ещё нужно проверить на текущем
         // currentRealDistance, и позиция курсора в этом списке.
@@ -290,13 +313,14 @@ public final class ScanCommand {
         private int pendingCursor;
 
         ScanTask(Location scannerBase, Location displayBase, World displayWorld,
-                 List<Vector3f> rayDirections, int maxRadius, int scale) {
+                 List<Vector3f> rayDirections, int maxRadius, int scannerScale, int displayScale) {
             this.scannerBase = scannerBase;
             this.displayBase = displayBase;
             this.displayWorld = displayWorld;
             this.rayDirections = rayDirections;
             this.maxRadius = maxRadius;
-            this.scale = scale;
+            this.scannerScale = scannerScale;
+            this.displayScale = displayScale;
             this.resolved = new boolean[rayDirections.size()];
         }
 
@@ -348,10 +372,18 @@ public final class ScanCommand {
         /**
          * Проверяет реальный блок на смещении (dx, dy, dz) от сканера.
          * Если это не воздух и у блока есть предметная форма — спавнит
-         * ItemDisplay в сжатой (dx/scale, dy/scale, dz/scale) точке
-         * относительно дисплея и возвращает {@code true} (луч "нашёл"
-         * свой первый блок). Если подходящего блока нет — возвращает
-         * {@code false}, и луч на следующем тике продвинется дальше.
+         * ItemDisplay в соответствующей ячейке подсетки дисплея и
+         * возвращает {@code true} (луч "нашёл" свой первый блок). Если
+         * подходящего блока нет — возвращает {@code false}, и луч на
+         * следующем тике продвинется дальше.
+         * <p>
+         * Сначала точка сжимается в scannerScale раз (как и раньше) —
+         * это переводит реальные координаты в координаты модели. Затем,
+         * уже внутри модели, точка дополнительно квантуется в ячейку
+         * подсетки размером 1/displayScale блока: при displayScale = 1
+         * это обычный блок модели (как раньше), при displayScale = N —
+         * блок модели делится на N×N×N ячеек, в каждую из которых может
+         * попасть свой отдельный, пропорционально уменьшенный item-display.
          */
         private boolean trySpawnFirstHit(double dx, double dy, double dz) {
             Location scanPoint = scannerBase.clone().add(dx, dy, dz);
@@ -362,17 +394,41 @@ public final class ScanCommand {
                 return false; // ничего не нашли — луч летит дальше
             }
 
-            Block spawnBlock = displayBase.clone().add(dx / scale, dy / scale, dz / scale).getBlock();
-            long blockKey = blockKey(spawnBlock);
+            // Координаты точки в пространстве модели (после сжатия scannerScale),
+            // относительно displayBase.
+            double modelX = dx / scannerScale;
+            double modelY = dy / scannerScale;
+            double modelZ = dz / scannerScale;
 
-            if (!occupiedDisplayBlocks.add(blockKey)) {
-                // Блок модели уже занят другим лучом — считаем луч разрешённым,
+            // Размер одной ячейки подсетки, в блоках модели.
+            double cellSize = 1.0 / displayScale;
+
+            // Индекс ячейки подсетки, в которую попадает точка.
+            long cellX = (long) Math.floor(modelX / cellSize);
+            long cellY = (long) Math.floor(modelY / cellSize);
+            long cellZ = (long) Math.floor(modelZ / cellSize);
+
+            long cellKey = cellKey(cellX, cellY, cellZ);
+
+            if (!occupiedDisplayCells.add(cellKey)) {
+                // Ячейка модели уже занята другим лучом — считаем луч разрешённым,
                 // но не спавним дубликат сущности поверх уже существующей.
                 return true;
             }
 
-            Location spawnLocation = spawnBlock.getLocation().add(0.5, 0.5, 0.5); // центр блока
+            // Центр ячейки подсетки в мировых координатах.
+            Location spawnLocation = displayBase.clone().add(
+                    (cellX + 0.5) * cellSize,
+                    (cellY + 0.5) * cellSize,
+                    (cellZ + 0.5) * cellSize
+            );
             ItemStack itemStack = new ItemStack(material);
+
+            // Базовый масштаб 2f соответствует размеру целого блока
+            // (при displayScale = 1). При большем displayScale каждый
+            // item-display пропорционально уменьшается, чтобы ровно
+            // displayScale³ штук помещалось в объёме одного блока модели.
+            float itemScale = 2f / displayScale;
 
             displayWorld.spawn(spawnLocation, ItemDisplay.class, entity -> {
                 entity.setItemStack(itemStack);
@@ -387,7 +443,7 @@ public final class ScanCommand {
                 Transformation transformation = new Transformation(
                         new Vector3f(0f, 0f, 0f),        // translation — без смещения
                         new AxisAngle4f(0f, 0f, 0f, 1f),  // left rotation — без поворота
-                        new Vector3f(2f, 2f, 2f),         // scale — увеличено до размеров блока
+                        new Vector3f(itemScale, itemScale, itemScale), // scale — под размер ячейки
                         new AxisAngle4f(0f, 0f, 0f, 1f)   // right rotation — без поворота
                 );
                 entity.setTransformation(transformation);
