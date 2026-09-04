@@ -1,6 +1,6 @@
 name: Scanner
 description: A Minecraft plugin that adds a command for scanning the terrain with rakecasts.
-version: '1.2.0'
+version: '1.2.1'
 
 main: net.dvmn2.scanner.Scanner
 api-version: '1.21.11'

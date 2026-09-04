@@ -3,6 +3,8 @@ package net.dvmn2.scanner;
 import io.papermc.paper.command.brigadier.Commands;
 import io.papermc.paper.plugin.lifecycle.event.types.LifecycleEvents;
 
+import net.dvmn2.scanner.command.ScanCommand;
+
 import org.bukkit.plugin.java.JavaPlugin;
 
 /**
