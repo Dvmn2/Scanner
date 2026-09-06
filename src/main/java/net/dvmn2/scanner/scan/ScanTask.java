@@ -40,6 +40,9 @@ public final class ScanTask extends BukkitRunnable {
     // каждый исходный блок дисплея (см. {@link #trySpawnFirstHit}).
     private final int displayScale;
 
+    // Способ визуализации найденных блоков — партиклы или item-display'и.
+    private final ScanType type;
+
     // Текущее реальное расстояние (в блоках) от сканера, на котором
     // проверяются все ещё активные лучи на этом шаге анимации.
     private double currentRealDistance = RAY_STEP;
@@ -61,7 +64,8 @@ public final class ScanTask extends BukkitRunnable {
     private int pendingCursor;
 
     public ScanTask(Location scannerBase, Location displayBase, World displayWorld,
-                     List<Vector3f> rayDirections, int maxRadius, int scannerScale, int displayScale) {
+                     List<Vector3f> rayDirections, int maxRadius, int scannerScale, int displayScale,
+                     ScanType type) {
         this.scannerBase = scannerBase;
         this.displayBase = displayBase;
         this.displayWorld = displayWorld;
@@ -69,6 +73,7 @@ public final class ScanTask extends BukkitRunnable {
         this.maxRadius = maxRadius;
         this.scannerScale = scannerScale;
         this.displayScale = displayScale;
+        this.type = type;
         this.resolved = new boolean[rayDirections.size()];
     }
 
@@ -164,20 +169,28 @@ public final class ScanTask extends BukkitRunnable {
             return true;
         }
 
-        // Центр ячейки подсетки в мировых координатах.
+        // Центр ячейки подсетки в мировых координатах — партиклы, как и
+        // item-display'и, спавнятся именно здесь, на месте встреченного блока.
         Location spawnLocation = displayBase.clone().add(
                 (cellX + 0.5) * cellSize,
                 (cellY + 0.5) * cellSize,
                 (cellZ + 0.5) * cellSize
         );
 
-        // Базовый масштаб 2f соответствует размеру целого блока
-        // (при displayScale = 1). При большем displayScale каждый
-        // item-display пропорционально уменьшается, чтобы ровно
-        // displayScale³ штук помещалось в объёме одного блока модели.
-        float itemScale = 2f / displayScale;
-
-        ScanDisplays.spawn(displayWorld, spawnLocation, material, itemScale);
+        if (type == ScanType.PARTICLE) {
+            // Прогресс луча от сканера (0.0) до maxRadius (1.0) определяет
+            // цвет партикла: синий вблизи сканера, зелёный к концу радиуса.
+            double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            double progress = distance / maxRadius;
+            ScanParticles.spawn(displayWorld, spawnLocation, progress);
+        } else {
+            // Базовый масштаб 2f соответствует размеру целого блока
+            // (при displayScale = 1). При большем displayScale каждый
+            // item-display пропорционально уменьшается, чтобы ровно
+            // displayScale³ штук помещалось в объёме одного блока модели.
+            float itemScale = 2f / displayScale;
+            ScanDisplays.spawn(displayWorld, spawnLocation, material, itemScale);
+        }
 
         return true;
     }

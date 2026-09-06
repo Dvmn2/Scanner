@@ -2,6 +2,7 @@ package net.dvmn2.scanner.command;
 
 import com.mojang.brigadier.Command;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.builder.ArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.brigadier.tree.LiteralCommandNode;
@@ -14,6 +15,7 @@ import io.papermc.paper.command.brigadier.argument.resolvers.selector.EntitySele
 import net.dvmn2.scanner.scan.RayDirections;
 import net.dvmn2.scanner.scan.ScanDisplays;
 import net.dvmn2.scanner.scan.ScanTask;
+import net.dvmn2.scanner.scan.ScanType;
 
 import org.bukkit.ChatColor;
 import org.bukkit.Location;
@@ -53,6 +55,13 @@ import java.util.List;
  */
 public final class ScanCommand {
 
+    // Значения по умолчанию для необязательных параметров команды —
+    // применяются, если соответствующий аргумент не указан при вызове.
+    private static final int DEFAULT_MAX_RADIUS = 10;
+    private static final int DEFAULT_SCANNER_SCALE = 1;
+    private static final int DEFAULT_DISPLAY_SCALE = 1;
+    private static final int DEFAULT_DELAY_TICKS = 1;
+
     // Ссылка на плагин нужна, чтобы планировать повторяющуюся задачу
     // через Bukkit Scheduler (BukkitRunnable#runTaskTimer).
     private final JavaPlugin plugin;
@@ -61,11 +70,6 @@ public final class ScanCommand {
     //  1) отменить предыдущий незавершённый скан при повторном вызове команды;
     //  2) корректно остановить скан при выключении плагина (см. Scanner#onDisable).
     private BukkitTask activeScanTask;
-
-    private static final int DEFAULT_MAX_RADIUS = 10;
-    private static final int DEFAULT_SCANNER_SCALE = 1;
-    private static final int DEFAULT_DISPLAY_SCALE = 1;
-    private static final int DEFAULT_DELAY_TICKS = 1;
 
     public ScanCommand(JavaPlugin plugin) {
         this.plugin = plugin;
@@ -91,50 +95,73 @@ public final class ScanCommand {
                 // Команду может выполнять только тот, у кого есть право scan.admin
                 // (обычно выдаётся операторам через права-плагин или permissions.yml).
                 .requires(source -> source.getSender().hasPermission("scan.admin"))
-                .then(Commands.argument("scanner", ArgumentTypes.entity())
-                        .then(Commands.argument("display", ArgumentTypes.entity())
-                                .executes(ctx -> run(ctx,
-                                        DEFAULT_MAX_RADIUS, DEFAULT_SCANNER_SCALE,
-                                        DEFAULT_DISPLAY_SCALE, DEFAULT_DELAY_TICKS))
-                                .then(Commands.argument("maxRadius", IntegerArgumentType.integer(1))
-                                        .executes(ctx -> run(ctx,
+                // Обязательный параметр type — способ отображения результата скана:
+                // "particle" (цветные партиклы) или "display" (модель из item-display'ев).
+                // Оба литерала ведут в одно и то же поддерево аргументов сущностей.
+                .then(Commands.literal("particle").then(scanArguments(ScanType.PARTICLE)))
+                .then(Commands.literal("display").then(scanArguments(ScanType.DISPLAY)))
+                .build();
+    }
+
+    /**
+     * Строит общее поддерево аргументов {@code <scanner> <display> [maxRadius]
+     * [scannerScale] [displayScale] [delayTicks]}, одинаковое для обоих
+     * вариантов параметра {@code type}. Значение {@code type} фиксируется
+     * заранее (через литерал в {@link #create()}) и подставляется во все
+     * вызовы {@link #run}.
+     */
+    private ArgumentBuilder<CommandSourceStack, ?> scanArguments(ScanType type) {
+        return Commands.argument("scanner", ArgumentTypes.entity())
+                .then(Commands.argument("display", ArgumentTypes.entity())
+                        // Ни один из числовых параметров не указан — берём все значения по умолчанию.
+                        .executes(ctx -> run(ctx, type,
+                                DEFAULT_MAX_RADIUS, DEFAULT_SCANNER_SCALE,
+                                DEFAULT_DISPLAY_SCALE, DEFAULT_DELAY_TICKS))
+                        .then(Commands.argument("maxRadius", IntegerArgumentType.integer(1))
+                                .executes(ctx -> run(ctx, type,
+                                        IntegerArgumentType.getInteger(ctx, "maxRadius"),
+                                        DEFAULT_SCANNER_SCALE, DEFAULT_DISPLAY_SCALE, DEFAULT_DELAY_TICKS))
+                                .then(Commands.argument("scannerScale", IntegerArgumentType.integer(1))
+                                        .executes(ctx -> run(ctx, type,
                                                 IntegerArgumentType.getInteger(ctx, "maxRadius"),
-                                                DEFAULT_SCANNER_SCALE, DEFAULT_DISPLAY_SCALE, DEFAULT_DELAY_TICKS))
-                                        .then(Commands.argument("scannerScale", IntegerArgumentType.integer(1))
-                                                .executes(ctx -> run(ctx,
+                                                IntegerArgumentType.getInteger(ctx, "scannerScale"),
+                                                DEFAULT_DISPLAY_SCALE, DEFAULT_DELAY_TICKS))
+                                        .then(Commands.argument("displayScale", IntegerArgumentType.integer(1))
+                                                .executes(ctx -> run(ctx, type,
                                                         IntegerArgumentType.getInteger(ctx, "maxRadius"),
                                                         IntegerArgumentType.getInteger(ctx, "scannerScale"),
-                                                        DEFAULT_DISPLAY_SCALE, DEFAULT_DELAY_TICKS))
-                                                .then(Commands.argument("displayScale", IntegerArgumentType.integer(1))
-                                                        .executes(ctx -> run(ctx,
+                                                        IntegerArgumentType.getInteger(ctx, "displayScale"),
+                                                        DEFAULT_DELAY_TICKS))
+                                                .then(Commands.argument("delayTicks", IntegerArgumentType.integer(1))
+                                                        .executes(ctx -> run(ctx, type,
                                                                 IntegerArgumentType.getInteger(ctx, "maxRadius"),
                                                                 IntegerArgumentType.getInteger(ctx, "scannerScale"),
                                                                 IntegerArgumentType.getInteger(ctx, "displayScale"),
-                                                                DEFAULT_DELAY_TICKS))
-                                                        .then(Commands.argument("delayTicks", IntegerArgumentType.integer(1))
-                                                                .executes(ctx -> run(ctx,
-                                                                        IntegerArgumentType.getInteger(ctx, "maxRadius"),
-                                                                        IntegerArgumentType.getInteger(ctx, "scannerScale"),
-                                                                        IntegerArgumentType.getInteger(ctx, "displayScale"),
-                                                                        IntegerArgumentType.getInteger(ctx, "delayTicks")))
-                                                        )
+                                                                IntegerArgumentType.getInteger(ctx, "delayTicks")))
                                                 )
                                         )
                                 )
                         )
-                )
-                .build();
+                );
     }
 
     /**
      * Точка входа при выполнении команды: разбирает аргументы, готовит
      * общие данные (координаты, направления лучей) и запускает
      * периодическую задачу {@link ScanTask}, которая ведёт сам скан.
+     * <p>
+     * Числовые параметры ({@code maxRadius}, {@code scannerScale},
+     * {@code displayScale}, {@code delayTicks}) необязательны — если они
+     * не указаны при вызове команды, сюда попадают значения по умолчанию
+     * (см. {@link #DEFAULT_MAX_RADIUS} и соседние константы), подставленные
+     * в дереве команды в {@link #create()}.
      */
-    private int run(CommandContext<CommandSourceStack> ctx,
-                    int maxRadius, int scannerScale, int displayScale, int delayTicks) throws CommandSyntaxException {
+    private int run(CommandContext<CommandSourceStack> ctx, ScanType type,
+                     int maxRadius, int scannerScale, int displayScale, int delayTicks) throws CommandSyntaxException {
         CommandSender sender = ctx.getSource().getSender();
 
+        // Аргументы-селекторы сущностей (@e, @p, конкретное имя и т.д.)
+        // резолвятся в конкретные сущности относительно источника команды.
         EntitySelectorArgumentResolver scannerResolver =
                 ctx.getArgument("scanner", EntitySelectorArgumentResolver.class);
         EntitySelectorArgumentResolver displayResolver =
@@ -181,7 +208,7 @@ public final class ScanCommand {
         sender.sendMessage(ChatColor.GREEN + "Скан запущен!");
 
         ScanTask task = new ScanTask(scannerBase, displayBase, displayWorld,
-                rayDirections, maxRadius, scannerScale, displayScale);
+                rayDirections, maxRadius, scannerScale, displayScale, type);
 
         activeScanTask = task.runTaskTimer(plugin, 0L, delayTicks);
 
