@@ -1,5 +1,7 @@
 package net.dvmn2.scanner.scan;
 
+import io.papermc.paper.datacomponent.DataComponentTypes;
+
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
@@ -38,16 +40,65 @@ public final class ScanDisplays {
     }
 
     /**
-     * Спавнит один ItemDisplay заданного материала в указанной точке,
+     * Строит {@link ItemStack} материала {@code material} для спавна в
+     * модели, при необходимости перенося на него "визуальные" компоненты
+     * (имя, custom_model_data, item_model) с исходного предмета
+     * {@code renderSource} — это нужно, чтобы ресурспак применял к
+     * заспавненному item-display'ю ту же кастомную модель/оверрайд, что и
+     * у оригинального предмета (например, у "scannable"-дисплея,
+     * привязанного к Interaction-сущности).
+     * <p>
+     * Если {@code renderSource == null} (обычный блок из мира без
+     * кастомных компонентов) — возвращается просто чистый
+     * {@code new ItemStack(material)}, как и раньше.
+     */
+    public static ItemStack buildItemStack(Material material, ItemStack renderSource) {
+        ItemStack itemStack = new ItemStack(material);
+
+        if (renderSource != null) {
+            copyRenderComponents(renderSource, itemStack);
+        }
+
+        return itemStack;
+    }
+
+    /**
+     * Переносит с {@code source} на {@code target} только те компоненты,
+     * которые влияют на визуальное отображение предмета ресурспаком:
+     * {@code minecraft:custom_name}, {@code minecraft:custom_model_data}
+     * и {@code minecraft:item_model}. Остальные компоненты (например,
+     * служебный {@code custom_data} плагинов, генерирующих ресурспак)
+     * намеренно не копируются — они не нужны для отображения и могут
+     * тянуть за собой лишние данные.
+     * <p>
+     * Компонент копируется, только если он реально присутствует на
+     * {@code source} — иначе на предмете модели останется дефолтное
+     * значение материала, как и должно быть.
+     */
+    private static void copyRenderComponents(ItemStack source, ItemStack target) {
+        if (source.hasData(DataComponentTypes.CUSTOM_NAME)) {
+            target.setData(DataComponentTypes.CUSTOM_NAME, source.getData(DataComponentTypes.CUSTOM_NAME));
+        }
+
+        if (source.hasData(DataComponentTypes.CUSTOM_MODEL_DATA)) {
+            target.setData(DataComponentTypes.CUSTOM_MODEL_DATA, source.getData(DataComponentTypes.CUSTOM_MODEL_DATA));
+        }
+
+        if (source.hasData(DataComponentTypes.ITEM_MODEL)) {
+            target.setData(DataComponentTypes.ITEM_MODEL, source.getData(DataComponentTypes.ITEM_MODEL));
+        }
+    }
+
+    /**
+     * Спавнит один ItemDisplay с заданным (уже полностью собранным, включая
+     * визуальные компоненты — см. {@link #buildItemStack}) item stack'ом,
      * с равномерным масштабом {@code itemScale} по всем осям и без
      * поворотов и смещений.
      * <p>
      * Тень отключена — она ничего не добавляет к результату скана,
      * но заметно дороже для клиента при большом количестве сущностей.
      */
-    public static void spawn(World world, Location spawnLocation, Material material, float itemScale) {
-        ItemStack itemStack = new ItemStack(material);
-
+    public static void spawn(World world, Location spawnLocation, ItemStack itemStack, float itemScale) {
         world.spawn(spawnLocation, ItemDisplay.class, entity -> {
             entity.setItemStack(itemStack);
             entity.setCustomName(SCAN_NAME);

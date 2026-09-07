@@ -26,6 +26,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 import org.joml.Vector3f;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -35,6 +36,8 @@ import java.util.List;
  * Синтаксис команды:
  * <pre>
  *     /scan <scanner> <display> <maxRadius> <scannerScale> <displayScale> <delayTicks>
+ *     /scan stop
+ *     /scan cancel
  * </pre>
  * <ul>
  *     <li><b>scanner</b> — сущность, вокруг которой ведётся сканирование блоков;</li>
@@ -48,6 +51,23 @@ import java.util.List;
  *         {@code displayScale = N} — подсетка N×N×N (N³ item-display на блок);</li>
  *     <li><b>delayTicks</b> — интервал (в тиках) между шагами анимации скана.</li>
  * </ul>
+ * <p>
+ * Помимо {@code particle}/{@code display} команда поддерживает два
+ * служебных подкоманды:
+ * <ul>
+ *     <li>{@code /scan stop} — останавливает ВСЕ активные сканирования,
+ *         не трогая уже заспавненные item-display'и;</li>
+ *     <li>{@code /scan cancel} — останавливает ВСЕ активные сканирования
+ *         и дополнительно удаляет все item-display'и, оставшиеся от сканов.</li>
+ * </ul>
+ * <p>
+ * Плагин поддерживает произвольное число одновременно выполняющихся
+ * сканирований — каждый вызов {@code /scan particle ...} или
+ * {@code /scan display ...} запускает независимую задачу {@link ScanTask},
+ * не отменяя предыдущие. Поэтому старые item-display'и больше не удаляются
+ * автоматически при старте нового скана (иначе это стирало бы модели
+ * других, ещё выполняющихся сканов) — для очистки используйте
+ * {@code /scan cancel}.
  * <p>
  * Алгоритм работы: от сканера во все стороны выпускаются лучи, равномерно
  * покрывающие сферу (см. {@link RayDirections}). Сама пошаговая анимация
@@ -66,23 +86,35 @@ public final class ScanCommand {
     // через Bukkit Scheduler (BukkitRunnable#runTaskTimer).
     private final JavaPlugin plugin;
 
-    // Ссылка на текущий выполняющийся скан. Нужна, чтобы:
-    //  1) отменить предыдущий незавершённый скан при повторном вызове команды;
-    //  2) корректно остановить скан при выключении плагина (см. Scanner#onDisable).
-    private BukkitTask activeScanTask;
+    // Список всех сейчас выполняющихся сканирований. В отличие от старой
+    // версии (одно поле activeScanTask), теперь их может быть несколько —
+    // каждый вызов /scan particle|display добавляет сюда новую задачу,
+    // не отменяя предыдущие. Нужен, чтобы:
+    //  1) массово остановить все сканы по /scan stop и /scan cancel;
+    //  2) корректно остановить все сканы при выключении плагина
+    //     (см. Scanner#onDisable).
+    private final List<BukkitTask> activeScanTasks = new ArrayList<>();
 
     public ScanCommand(JavaPlugin plugin) {
         this.plugin = plugin;
     }
 
     /**
-     * Отменяет текущий выполняющийся скан, если он ещё активен.
-     * Безопасно вызывать, даже если скан уже завершён или не запускался.
+     * Останавливает все выполняющиеся сканирования (item-display'и при
+     * этом не удаляются). Безопасно вызывать, даже если сканов нет.
+     *
+     * @return количество реально остановленных (ещё не завершённых) сканов
      */
-    public void cancelActiveScan() {
-        if (activeScanTask != null && !activeScanTask.isCancelled()) {
-            activeScanTask.cancel();
+    public int stopAllScans() {
+        int stopped = 0;
+        for (BukkitTask task : activeScanTasks) {
+            if (!task.isCancelled()) {
+                task.cancel();
+                stopped++;
+            }
         }
+        activeScanTasks.clear();
+        return stopped;
     }
 
     /**
@@ -100,6 +132,10 @@ public final class ScanCommand {
                 // Оба литерала ведут в одно и то же поддерево аргументов сущностей.
                 .then(Commands.literal("particle").then(scanArguments(ScanType.PARTICLE)))
                 .then(Commands.literal("display").then(scanArguments(ScanType.DISPLAY)))
+                // Служебные подкоманды управления уже запущенными сканами —
+                // аргументов не требуют и работают сразу над всеми активными сканами.
+                .then(Commands.literal("stop").executes(this::stop))
+                .then(Commands.literal("cancel").executes(this::cancel))
                 .build();
     }
 
@@ -146,9 +182,38 @@ public final class ScanCommand {
     }
 
     /**
+     * Обработчик {@code /scan stop}: останавливает все активные сканы,
+     * не трогая уже заспавненные item-display'и.
+     */
+    private int stop(CommandContext<CommandSourceStack> ctx) {
+        CommandSender sender = ctx.getSource().getSender();
+        int stopped = stopAllScans();
+        sender.sendMessage(ChatColor.YELLOW + "Остановлено активных сканирований: " + stopped);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    /**
+     * Обработчик {@code /scan cancel}: останавливает все активные сканы
+     * и удаляет все item-display'и, оставшиеся от сканов, во всех мирах
+     * сервера (сканы могли идти в разных мирах одновременно).
+     */
+    private int cancel(CommandContext<CommandSourceStack> ctx) {
+        CommandSender sender = ctx.getSource().getSender();
+        int stopped = stopAllScans();
+        for (World world : plugin.getServer().getWorlds()) {
+            ScanDisplays.removeAll(world);
+        }
+        sender.sendMessage(ChatColor.YELLOW + "Остановлено сканирований: " + stopped
+                + ", все item-display'и сканов удалены.");
+        return Command.SINGLE_SUCCESS;
+    }
+
+    /**
      * Точка входа при выполнении команды: разбирает аргументы, готовит
      * общие данные (координаты, направления лучей) и запускает
      * периодическую задачу {@link ScanTask}, которая ведёт сам скан.
+     * Задача добавляется в список активных сканов, не отменяя уже
+     * выполняющиеся — так поддерживаются параллельные сканирования.
      * <p>
      * Числовые параметры ({@code maxRadius}, {@code scannerScale},
      * {@code displayScale}, {@code delayTicks}) необязательны — если они
@@ -157,7 +222,7 @@ public final class ScanCommand {
      * в дереве команды в {@link #create()}.
      */
     private int run(CommandContext<CommandSourceStack> ctx, ScanType type,
-                     int maxRadius, int scannerScale, int displayScale, int delayTicks) throws CommandSyntaxException {
+                    int maxRadius, int scannerScale, int displayScale, int delayTicks) throws CommandSyntaxException {
         CommandSender sender = ctx.getSource().getSender();
 
         // Аргументы-селекторы сущностей (@e, @p, конкретное имя и т.д.)
@@ -197,20 +262,16 @@ public final class ScanCommand {
         // укрупнённую ячейку, и displayScale не давал бы видимого эффекта).
         List<Vector3f> rayDirections = RayDirections.build(maxDisplayRadius * displayScale);
 
-        // Если уже идёт предыдущий скан — останавливаем его перед запуском нового,
-        // чтобы две анимации не спавнили сущности одновременно.
-        cancelActiveScan();
+        // Чистим список от уже завершённых/отменённых сканов, чтобы он
+        // не рос бесконечно при частых запусках.
+        activeScanTasks.removeIf(BukkitTask::isCancelled);
 
-        // Удаляем все ItemDisplay-сущности, оставшиеся от предыдущего скана,
-        // прежде чем начинать спавнить новые.
-        ScanDisplays.removeAll(displayWorld);
-
-        sender.sendMessage(ChatColor.GREEN + "Скан запущен!");
+        sender.sendMessage(ChatColor.GREEN + "Скан запущен! Активных сканирований: " + (activeScanTasks.size() + 1));
 
         ScanTask task = new ScanTask(scannerBase, displayBase, displayWorld,
                 rayDirections, maxRadius, scannerScale, displayScale, type);
 
-        activeScanTask = task.runTaskTimer(plugin, 0L, delayTicks);
+        activeScanTasks.add(task.runTaskTimer(plugin, 0L, delayTicks));
 
         return Command.SINGLE_SUCCESS;
     }
