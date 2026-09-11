@@ -1,3 +1,4 @@
 settings:
-  enabled: true
-  message: "Config enabled!"
+  # Язык сообщений плагина: "ru", "en" или "auto" (по локали игрока, консоль — en).
+  # Plugin message language: "ru", "en" or "auto" (per-player locale, console — en).
+  language: "auto"

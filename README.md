@@ -1,29 +1,19 @@
 # Scanner
 
-Paper-плагин для Minecraft 1.21.11, добавляющий команду `/scan`, которая "просвечивает" пространство вокруг сущности
-лучами во все стороны и строит уменьшенную 3D-модель найденных блоков рядом с другой сущностью — либо цветными
-партиклами, либо из сущностей `ItemDisplay`.
+A Paper plugin that scans the terrain around an entity using raycasts and renders the result as a scaled-down 3D model next to another entity.
 
-## Возможности
+## Requirements
 
-- **Два режима отображения**
-    - `particle` — окрашенные партиклы (градиент синий → зелёный по мере удаления от сканера, красный — для найденных
-      Interaction-сущностей);
-    - `display` — уменьшенная модель из `ItemDisplay`, с сохранением текстуры/модели найденных блоков.
-- **Поддержка Interaction-сущностей.** Если луч попадает в невидимую Interaction-сущность, плагин находит рядом с ней
-  размеченный тегом `scannable` `ItemDisplay` и переносит его визуальное представление (custom_name, custom_model_data,
-  item_model) на соответствующую точку модели.
-- **Настраиваемый масштаб.** Радиус скана, масштаб сжатия модели и плотность item-display'ев (подсетка N×N×N на блок)
-  задаются отдельными параметрами команды.
-- **Плавная анимация.** Скан идёт слоями сферы наружу от сканера с настраиваемой задержкой между шагами (в тиках), а не
-  мгновенно.
-- **Параллельные сканы.** Можно одновременно запускать сколько угодно сканирований — они не мешают друг другу.
-- **Управление активными сканами.** Команды `stop` (остановить анимацию) и `cancel` (остановить + удалить все
-  заспавненные модели) во всех мирах сразу.
-- **Корректное завершение работы.** Все активные сканы автоматически останавливаются при выключении/перезагрузке
-  плагина.
+- Paper 1.21.11 or a compatible fork
+- Java 21
 
-## Команда
+## How it works
+
+The `/scan` command casts a set of rays outward from a chosen "scanner" entity in all directions, up to a configurable radius. Each ray reports the first solid block or `Interaction` entity it hits. The result is rendered as a compressed model next to a "display" entity, either as colored particles or as a grid of `ItemDisplay` entities matching the scanned blocks.
+
+Multiple scans can run concurrently; each invocation starts an independent task.
+
+## Command
 
 ```
 /scan <particle|display> <scanner> <display> [maxRadius] [scannerScale] [displayScale] [delayTicks]
@@ -31,50 +21,44 @@ Paper-плагин для Minecraft 1.21.11, добавляющий команд
 /scan cancel
 ```
 
-| Параметр            | Описание                                                                | По умолчанию |
-|---------------------|-------------------------------------------------------------------------|:------------:|
-| `particle\|display` | Способ отображения результата: партиклы или item-display модель         |      —       |
-| `scanner`           | Сущность (селектор), вокруг которой ведётся сканирование                |      —       |
-| `display`           | Сущность (селектор), рядом с которой строится модель                    |      —       |
-| `maxRadius`         | Максимальный радиус скана в реальных блоках                             |      10      |
-| `scannerScale`      | Во сколько раз уменьшается модель относительно реального мира           |      1       |
-| `displayScale`      | Плотность item-display'ев: подсетка `displayScale`³ на один блок модели |      1       |
-| `delayTicks`        | Интервал между шагами анимации, в тиках                                 |      1       |
+| Argument | Description | Default |
+|---|---|---|
+| `particle` / `display` | Rendering mode: colored dust particles or `ItemDisplay` entities | required |
+| `scanner` | Entity selector for the scan origin | required |
+| `display` | Entity selector for where the model is rendered | required |
+| `maxRadius` | Scan radius in blocks | 10 |
+| `scannerScale` | Factor by which the model is shrunk relative to the real world | 1 |
+| `displayScale` | Number of sub-cells per block edge in the rendered model (`displayScale³` display entities per block) | 1 |
+| `delayTicks` | Delay in ticks between animation steps | 1 |
 
-### Примеры
+`stop` cancels all running scans without removing already spawned entities. `cancel` cancels all running scans and removes every `ItemDisplay` created by the plugin.
+
+## Permissions
+
+| Permission | Description | Default |
+|---|---|---|
+| `scan.admin` | Access to the `/scan` command | op |
+
+## Configuration
+
+`config.yml`:
+
+```yaml
+settings:
+  # Plugin message language: "ru", "en", or "auto".
+  # "auto" resolves per command sender: players use their client locale,
+  # console and other non-player senders default to English.
+  language: "auto"
+```
+
+## Building
 
 ```
-/scan particle @e[name=MyScanner] @e[name=MyDisplay]
-/scan display @e[name=MyScanner] @e[name=MyDisplay] 20 4 2 1
-/scan stop
-/scan cancel
+./gradlew build
 ```
 
-Второй пример: сканирует радиус 20 блоков, сжимает модель в 4 раза (итоговый радиус модели — 5 блоков) и делит каждый
-блок модели на подсетку 2×2×2 item-display'ев для более детальной картинки.
+The compiled jar is placed in `build/libs/`.
 
-## Права
+## License
 
-- `scan.admin` — доступ к команде `/scan` (все подкоманды).
-
-## Как это работает
-
-1. От точки `scanner` строится равномерная сетка направлений лучей, покрывающая сферу (плотность зависит от итогового
-   отображаемого радиуса).
-2. На каждом шаге анимации все ещё "неразрешённые" лучи продвигаются на 1 блок дальше и проверяются на попадание в
-   непустой блок или в Interaction-сущность.
-3. Как только луч находит цель, соответствующая ячейка модели (с учётом `scannerScale` и `displayScale`) окрашивается
-   партиклом или заполняется `ItemDisplay`, а сам луч больше не проверяется.
-4. Скан завершается, когда все лучи разрешены или достигнут `maxRadius`.
-
-## Требования
-
-- Paper (или форк на его основе) 1.21.11+
-- Java 21+
-
-## Установка
-
-1. Скачайте `.jar` со страницы релиза.
-2. Положите файл в папку `plugins/` вашего сервера.
-3. Перезапустите сервер.
-4. Выдайте право `scan.admin` нужным игрокам/группам.
+No license specified.

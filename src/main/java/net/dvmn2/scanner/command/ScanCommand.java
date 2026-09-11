@@ -12,12 +12,12 @@ import io.papermc.paper.command.brigadier.Commands;
 import io.papermc.paper.command.brigadier.argument.ArgumentTypes;
 import io.papermc.paper.command.brigadier.argument.resolvers.selector.EntitySelectorArgumentResolver;
 
+import net.dvmn2.scanner.Lang;
 import net.dvmn2.scanner.scan.RayDirections;
 import net.dvmn2.scanner.scan.ScanDisplays;
 import net.dvmn2.scanner.scan.ScanTask;
 import net.dvmn2.scanner.scan.ScanType;
 
-import org.bukkit.ChatColor;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.command.CommandSender;
@@ -30,69 +30,34 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Реализация команды {@code /scan}, зарегистрированной через Brigadier
- * (Paper Commands API, актуально для Paper 1.20.6+ / 1.21.x).
- * <p>
- * Синтаксис команды:
+ * Реализация команды {@code /scan} через Brigadier (Paper Commands API).
  * <pre>
- *     /scan <scanner> <display> <maxRadius> <scannerScale> <displayScale> <delayTicks>
+ *     /scan <particle|display> <scanner> <display> [maxRadius] [scannerScale] [displayScale] [delayTicks]
  *     /scan stop
  *     /scan cancel
  * </pre>
- * <ul>
- *     <li><b>scanner</b> — сущность, вокруг которой ведётся сканирование блоков;</li>
- *     <li><b>display</b> — сущность, рядом с которой строится уменьшенная модель;</li>
- *     <li><b>maxRadius</b> — максимальный радиус сканирования в реальных блоках;</li>
- *     <li><b>scannerScale</b> — во сколько раз уменьшается модель относительно оригинала
- *         (переносит реальные координаты блоков в координаты дисплея);</li>
- *     <li><b>displayScale</b> — во сколько раз повышается плотность ItemDisplay-сущностей
- *         за счёт их уменьшения: {@code displayScale = 1} — один item-display на блок модели,
- *         {@code displayScale = 2} — модель делится на подсетку 2×2×2 (8 item-display на блок),
- *         {@code displayScale = N} — подсетка N×N×N (N³ item-display на блок);</li>
- *     <li><b>delayTicks</b> — интервал (в тиках) между шагами анимации скана.</li>
- * </ul>
+ * scanner — сущность, вокруг которой ведётся сканирование; display — сущность,
+ * рядом с которой строится модель; maxRadius — радиус скана в реальных блоках;
+ * scannerScale — во сколько раз уменьшается модель; displayScale — на сколько
+ * подъячеек делится каждый блок модели (displayScale³ item-display на блок);
+ * delayTicks — интервал между шагами анимации.
  * <p>
- * Помимо {@code particle}/{@code display} команда поддерживает два
- * служебных подкоманды:
- * <ul>
- *     <li>{@code /scan stop} — останавливает ВСЕ активные сканирования,
- *         не трогая уже заспавненные item-display'и;</li>
- *     <li>{@code /scan cancel} — останавливает ВСЕ активные сканирования
- *         и дополнительно удаляет все item-display'и, оставшиеся от сканов.</li>
- * </ul>
- * <p>
- * Плагин поддерживает произвольное число одновременно выполняющихся
- * сканирований — каждый вызов {@code /scan particle ...} или
- * {@code /scan display ...} запускает независимую задачу {@link ScanTask},
- * не отменяя предыдущие. Поэтому старые item-display'и больше не удаляются
- * автоматически при старте нового скана (иначе это стирало бы модели
- * других, ещё выполняющихся сканов) — для очистки используйте
- * {@code /scan cancel}.
- * <p>
- * Алгоритм работы: от сканера во все стороны выпускаются лучи, равномерно
- * покрывающие сферу (см. {@link RayDirections}). Сама пошаговая анимация
- * и спавн модели реализованы в {@link ScanTask}.
+ * {@code stop} останавливает все активные сканы, не трогая уже заспавненные
+ * item-display'и. {@code cancel} останавливает сканы и дополнительно удаляет
+ * все item-display'и скана. Несколько сканов могут выполняться параллельно —
+ * каждый вызов запускает независимый {@link ScanTask}, не отменяя предыдущие.
  */
 public final class ScanCommand {
 
-    // Значения по умолчанию для необязательных параметров команды —
-    // применяются, если соответствующий аргумент не указан при вызове.
     private static final int DEFAULT_MAX_RADIUS = 10;
     private static final int DEFAULT_SCANNER_SCALE = 1;
     private static final int DEFAULT_DISPLAY_SCALE = 1;
     private static final int DEFAULT_DELAY_TICKS = 1;
 
-    // Ссылка на плагин нужна, чтобы планировать повторяющуюся задачу
-    // через Bukkit Scheduler (BukkitRunnable#runTaskTimer).
     private final JavaPlugin plugin;
 
-    // Список всех сейчас выполняющихся сканирований. В отличие от старой
-    // версии (одно поле activeScanTask), теперь их может быть несколько —
-    // каждый вызов /scan particle|display добавляет сюда новую задачу,
-    // не отменяя предыдущие. Нужен, чтобы:
-    //  1) массово остановить все сканы по /scan stop и /scan cancel;
-    //  2) корректно остановить все сканы при выключении плагина
-    //     (см. Scanner#onDisable).
+    // Список всех выполняющихся сканов — нужен, чтобы массово остановить их
+    // по /scan stop, /scan cancel и при выключении плагина (Scanner#onDisable).
     private final List<BukkitTask> activeScanTasks = new ArrayList<>();
 
     public ScanCommand(JavaPlugin plugin) {
@@ -100,10 +65,9 @@ public final class ScanCommand {
     }
 
     /**
-     * Останавливает все выполняющиеся сканирования (item-display'и при
-     * этом не удаляются). Безопасно вызывать, даже если сканов нет.
+     * Останавливает все выполняющиеся сканирования (item-display'и не удаляются).
      *
-     * @return количество реально остановленных (ещё не завершённых) сканов
+     * @return количество реально остановленных сканов
      */
     public int stopAllScans() {
         int stopped = 0;
@@ -117,39 +81,24 @@ public final class ScanCommand {
         return stopped;
     }
 
-    /**
-     * Строит дерево Brigadier-команды {@code /scan}.
-     * Регистрируется в {@code Scanner#onEnable} через
-     * {@code getLifecycleManager().registerEventHandler(LifecycleEvents.COMMANDS, ...)}.
-     */
     public LiteralCommandNode<CommandSourceStack> create() {
         return Commands.literal("scan")
-                // Команду может выполнять только тот, у кого есть право scan.admin
-                // (обычно выдаётся операторам через права-плагин или permissions.yml).
                 .requires(source -> source.getSender().hasPermission("scan.admin"))
-                // Обязательный параметр type — способ отображения результата скана:
-                // "particle" (цветные партиклы) или "display" (модель из item-display'ев).
-                // Оба литерала ведут в одно и то же поддерево аргументов сущностей.
                 .then(Commands.literal("particle").then(scanArguments(ScanType.PARTICLE)))
                 .then(Commands.literal("display").then(scanArguments(ScanType.DISPLAY)))
-                // Служебные подкоманды управления уже запущенными сканами —
-                // аргументов не требуют и работают сразу над всеми активными сканами.
                 .then(Commands.literal("stop").executes(this::stop))
                 .then(Commands.literal("cancel").executes(this::cancel))
                 .build();
     }
 
     /**
-     * Строит общее поддерево аргументов {@code <scanner> <display> [maxRadius]
-     * [scannerScale] [displayScale] [delayTicks]}, одинаковое для обоих
-     * вариантов параметра {@code type}. Значение {@code type} фиксируется
-     * заранее (через литерал в {@link #create()}) и подставляется во все
-     * вызовы {@link #run}.
+     * Общее поддерево аргументов {@code <scanner> <display> [maxRadius] [scannerScale]
+     * [displayScale] [delayTicks]}, одинаковое для particle и display. Каждый следующий
+     * числовой аргумент опционален и подставляет значение по умолчанию, если не указан.
      */
     private ArgumentBuilder<CommandSourceStack, ?> scanArguments(ScanType type) {
         return Commands.argument("scanner", ArgumentTypes.entity())
                 .then(Commands.argument("display", ArgumentTypes.entity())
-                        // Ни один из числовых параметров не указан — берём все значения по умолчанию.
                         .executes(ctx -> run(ctx, type,
                                 DEFAULT_MAX_RADIUS, DEFAULT_SCANNER_SCALE,
                                 DEFAULT_DISPLAY_SCALE, DEFAULT_DELAY_TICKS))
@@ -181,92 +130,74 @@ public final class ScanCommand {
                 );
     }
 
-    /**
-     * Обработчик {@code /scan stop}: останавливает все активные сканы,
-     * не трогая уже заспавненные item-display'и.
-     */
     private int stop(CommandContext<CommandSourceStack> ctx) {
         CommandSender sender = ctx.getSource().getSender();
         int stopped = stopAllScans();
-        sender.sendMessage(ChatColor.YELLOW + "Остановлено активных сканирований: " + stopped);
+        sender.sendMessage(Lang.get(Lang.Key.SCAN_STOPPED, sender) + stopped);
         return Command.SINGLE_SUCCESS;
     }
 
-    /**
-     * Обработчик {@code /scan cancel}: останавливает все активные сканы
-     * и удаляет все item-display'и, оставшиеся от сканов, во всех мирах
-     * сервера (сканы могли идти в разных мирах одновременно).
-     */
     private int cancel(CommandContext<CommandSourceStack> ctx) {
         CommandSender sender = ctx.getSource().getSender();
         int stopped = stopAllScans();
         for (World world : plugin.getServer().getWorlds()) {
             ScanDisplays.removeAll(world);
         }
-        sender.sendMessage(ChatColor.YELLOW + "Остановлено сканирований: " + stopped
-                + ", все item-display'и сканов удалены.");
+        sender.sendMessage(Lang.get(Lang.Key.SCAN_CANCELLED, sender) + stopped);
         return Command.SINGLE_SUCCESS;
     }
 
     /**
-     * Точка входа при выполнении команды: разбирает аргументы, готовит
-     * общие данные (координаты, направления лучей) и запускает
-     * периодическую задачу {@link ScanTask}, которая ведёт сам скан.
-     * Задача добавляется в список активных сканов, не отменяя уже
-     * выполняющиеся — так поддерживаются параллельные сканирования.
-     * <p>
-     * Числовые параметры ({@code maxRadius}, {@code scannerScale},
-     * {@code displayScale}, {@code delayTicks}) необязательны — если они
-     * не указаны при вызове команды, сюда попадают значения по умолчанию
-     * (см. {@link #DEFAULT_MAX_RADIUS} и соседние константы), подставленные
-     * в дереве команды в {@link #create()}.
+     * Разбирает аргументы и запускает {@link ScanTask}, добавляя её в список
+     * активных сканов (не отменяя уже выполняющиеся — так поддерживаются
+     * параллельные сканирования).
      */
     private int run(CommandContext<CommandSourceStack> ctx, ScanType type,
-                    int maxRadius, int scannerScale, int displayScale, int delayTicks) throws CommandSyntaxException {
+                     int maxRadius, int scannerScale, int displayScale, int delayTicks) throws CommandSyntaxException {
         CommandSender sender = ctx.getSource().getSender();
 
-        // Аргументы-селекторы сущностей (@e, @p, конкретное имя и т.д.)
-        // резолвятся в конкретные сущности относительно источника команды.
         EntitySelectorArgumentResolver scannerResolver =
                 ctx.getArgument("scanner", EntitySelectorArgumentResolver.class);
         EntitySelectorArgumentResolver displayResolver =
                 ctx.getArgument("display", EntitySelectorArgumentResolver.class);
 
-        Entity scannerEntity = scannerResolver.resolve(ctx.getSource()).getFirst();
-        Entity displayEntity = displayResolver.resolve(ctx.getSource()).getFirst();
+        List<Entity> scannerEntities = scannerResolver.resolve(ctx.getSource());
+        List<Entity> displayEntities = displayResolver.resolve(ctx.getSource());
 
-        // Реальный скан идёт до maxRadius, но на дисплее модель сжимается
-        // в scannerScale раз — это одновременно уменьшает видимый размер модели
-        // и количество заспавненных ItemDisplay-сущностей.
+        // БАГ в исходнике: .getFirst() на пустом списке кидал NoSuchElementException,
+        // если селектор (например, конкретное имя игрока) не находил ни одной сущности.
+        // Теперь это отдельно проверяется и выдаёт понятное локализованное сообщение.
+        if (scannerEntities.isEmpty() || displayEntities.isEmpty()) {
+            sender.sendMessage(Lang.get(Lang.Key.ENTITY_NOT_FOUND, sender));
+            return 0;
+        }
+
+        Entity scannerEntity = scannerEntities.get(0);
+        Entity displayEntity = displayEntities.get(0);
+
+        // Скан идёт до maxRadius, но модель сжимается в scannerScale раз —
+        // это одновременно уменьшает её видимый размер и число заспавненных сущностей.
         int maxDisplayRadius = (int) Math.max(0, Math.round(maxRadius / (double) scannerScale));
 
-        // Снимаем координаты сущностей один раз, в момент запуска команды.
-        // Скан идёт от зафиксированной точки, даже если сканер или дисплей
-        // потом сдвинутся, — иначе анимация "плыла" бы вместе с игроком.
+        // Координаты фиксируются один раз при запуске — иначе анимация "плыла"
+        // бы вместе с движением сканера/дисплея.
         Location scannerBase = scannerEntity.getLocation().clone();
         Location displayBase = displayEntity.getLocation().clone();
         World scannerWorld = scannerBase.getWorld();
         World displayWorld = displayBase.getWorld();
 
         if (scannerWorld == null || displayWorld == null) {
-            sender.sendMessage(ChatColor.RED + "Не удалось определить мир сущностей.");
+            sender.sendMessage(Lang.get(Lang.Key.WORLD_NOT_FOUND, sender));
             return 0;
         }
 
-        // Фиксированный набор направлений (единичных векторов), равномерно
-        // покрывающих сферу. Плотность считается один раз, от отображаемого
-        // радиуса, а не пересчитывается на каждом тике анимации.
-        // Умножаем радиус на displayScale, чтобы плотность лучей была
-        // достаточной для заполнения более мелкой подсетки item-display'ев
-        // (иначе несколько лучей продолжали бы попадать в одну и ту же
-        // укрупнённую ячейку, и displayScale не давал бы видимого эффекта).
+        // Радиус умножается на displayScale, чтобы плотности лучей хватало
+        // для заполнения более мелкой подсетки item-display'ев.
         List<Vector3f> rayDirections = RayDirections.build(maxDisplayRadius * displayScale);
 
-        // Чистим список от уже завершённых/отменённых сканов, чтобы он
-        // не рос бесконечно при частых запусках.
         activeScanTasks.removeIf(BukkitTask::isCancelled);
 
-        sender.sendMessage(ChatColor.GREEN + "Скан запущен! Активных сканирований: " + (activeScanTasks.size() + 1));
+        sender.sendMessage(Lang.get(Lang.Key.SCAN_STARTED, sender) + (activeScanTasks.size() + 1));
 
         ScanTask task = new ScanTask(scannerBase, displayBase, displayWorld,
                 rayDirections, maxRadius, scannerScale, displayScale, type);
