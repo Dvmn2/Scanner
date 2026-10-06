@@ -1,6 +1,6 @@
 name: Scanner
 description: A Minecraft plugin that adds a command for scanning the terrain with raycasts.
-version: '1.4.0'
+version: '${version}'
 
 main: net.dvmn2.scanner.Scanner
 api-version: '1.21.11'
