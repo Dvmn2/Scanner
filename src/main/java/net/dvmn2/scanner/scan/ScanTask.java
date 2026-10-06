@@ -22,6 +22,22 @@ import java.util.Set;
  * на непустой блок / Interaction-сущность. Когда все лучи разрешены или
  * достигнут maxRadius — задача сама себя отменяет. Экземпляры независимы
  * друг от друга, поэтому несколько ScanTask могут выполняться параллельно.
+ * <p>
+ * Направления из {@link RayDirections} заданы в "локальной" системе координат
+ * (x — вправо, y — вверх, z — вперёд) и сами по себе изотропны (покрывают
+ * сферу целиком), поэтому вращать их "просто так" бессмысленно. Вместо этого
+ * один и тот же локальный вектор направления проецируется в мир ДВАЖДЫ,
+ * разными базисами:
+ * <ul>
+ *     <li>базисом сканера (его yaw/pitch на момент запуска) — чтобы понять,
+ *     какой реальный блок в мире проверять;</li>
+ *     <li>базисом дисплея (его yaw/pitch на момент запуска) — чтобы понять,
+ *     куда в модели рядом с дисплеем поставить item-display/партикл.</li>
+ * </ul>
+ * За счёт этого то, что было "прямо перед" сканером, в модели оказывается
+ * "прямо перед" дисплеем — модель разворачивается вместе с тем, куда сейчас
+ * смотрит дисплей, независимо от фактической ориентации сканера и дисплея
+ * в мировых координатах.
  */
 public final class ScanTask extends BukkitRunnable {
 
@@ -49,6 +65,12 @@ public final class ScanTask extends BukkitRunnable {
     private final int displayScale;
     private final ScanType type;
 
+    // Базисы (право/верх/вперёд), в которые проецируются локальные направления
+    // лучей — считаются один раз по yaw/pitch сканера и дисплея на момент
+    // запуска скана (Location'ы scannerBase/displayBase их уже содержат).
+    private final Basis scannerBasis;
+    private final Basis displayBasis;
+
     private double currentRealDistance = RAY_STEP;
 
     // Лучи, уже нашедшие свой первый непустой блок — больше не проверяются.
@@ -64,8 +86,8 @@ public final class ScanTask extends BukkitRunnable {
     private int pendingCursor;
 
     public ScanTask(Location scannerBase, Location displayBase, World displayWorld,
-                     List<Vector3f> rayDirections, int maxRadius, int scannerScale, int displayScale,
-                     ScanType type) {
+                    List<Vector3f> rayDirections, int maxRadius, int scannerScale, int displayScale,
+                    ScanType type) {
         this.scannerBase = scannerBase;
         this.displayBase = displayBase;
         this.displayWorld = displayWorld;
@@ -75,6 +97,8 @@ public final class ScanTask extends BukkitRunnable {
         this.displayScale = displayScale;
         this.type = type;
         this.resolved = new boolean[rayDirections.size()];
+        this.scannerBasis = Basis.fromLocation(scannerBase);
+        this.displayBasis = Basis.fromLocation(displayBase);
     }
 
     @Override
@@ -105,11 +129,7 @@ public final class ScanTask extends BukkitRunnable {
             int rayIndex = pending.get(pendingCursor++);
             Vector3f direction = rayDirections.get(rayIndex);
 
-            double dx = direction.x * currentRealDistance;
-            double dy = direction.y * currentRealDistance;
-            double dz = direction.z * currentRealDistance;
-
-            if (trySpawnFirstHit(dx, dy, dz)) {
+            if (trySpawnFirstHit(direction, currentRealDistance)) {
                 resolved[rayIndex] = true;
             }
         }
@@ -119,16 +139,18 @@ public final class ScanTask extends BukkitRunnable {
     }
 
     /**
-     * Проверяет точку на смещении (dx, dy, dz) от сканера: сначала на
-     * Interaction-сущность, затем на обычный непустой блок. Возвращает
-     * {@code true}, если луч разрешён (что-то найдено).
+     * Проверяет точку, в которую луч с локальным направлением {@code direction}
+     * упирается на расстоянии {@code distance} от сканера (спроецированную в
+     * мир базисом сканера): сначала на Interaction-сущность, затем на обычный
+     * непустой блок. Возвращает {@code true}, если луч разрешён (что-то найдено).
      */
-    private boolean trySpawnFirstHit(double dx, double dy, double dz) {
-        Location scanPoint = scannerBase.clone().add(dx, dy, dz);
+    private boolean trySpawnFirstHit(Vector3f direction, double distance) {
+        Vector3f scanOffset = scannerBasis.toWorld(direction).mul((float) distance);
+        Location scanPoint = scannerBase.clone().add(scanOffset.x, scanOffset.y, scanOffset.z);
 
         Interaction interaction = findInteractionAt(scanPoint);
         if (interaction != null) {
-            handleInteractionHit(dx, dy, dz, interaction);
+            handleInteractionHit(direction, distance, interaction);
             return true;
         }
 
@@ -139,14 +161,13 @@ public final class ScanTask extends BukkitRunnable {
             return false; // ничего не нашли — луч летит дальше
         }
 
-        CellPoint cell = computeCell(dx, dy, dz);
+        CellPoint cell = computeCell(direction, distance);
 
         if (!occupiedDisplayCells.add(cell.key())) {
             return true; // ячейка уже занята другим лучом, дубликат не спавним
         }
 
         if (type == ScanType.PARTICLE) {
-            double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
             double progress = distance / maxRadius;
             ScanParticles.spawn(displayWorld, cell.spawnLocation(), progress);
         } else {
@@ -166,8 +187,8 @@ public final class ScanTask extends BukkitRunnable {
      * режиме PARTICLE — красный партикл; в режиме DISPLAY — ищет ближайший
      * "scannable" item-display и рисует в модели его материал/визуал.
      */
-    private void handleInteractionHit(double dx, double dy, double dz, Interaction interaction) {
-        CellPoint cell = computeCell(dx, dy, dz);
+    private void handleInteractionHit(Vector3f direction, double distance, Interaction interaction) {
+        CellPoint cell = computeCell(direction, distance);
 
         if (!occupiedDisplayCells.add(cell.key())) {
             return;
@@ -245,20 +266,20 @@ public final class ScanTask extends BukkitRunnable {
     }
 
     /**
-     * Переводит смещение (dx, dy, dz) от сканера в координаты ячейки подсетки
-     * дисплея: сначала сжимается в scannerScale раз (реальные координаты →
-     * координаты модели), затем квантуется в ячейку размером 1/displayScale блока.
+     * Переводит локальное направление луча {@code direction} на расстоянии
+     * {@code distance} в координаты ячейки подсетки дисплея: направление
+     * проецируется в мир базисом ДИСПЛЕЯ (а не сканера — в этом и есть
+     * привязка модели к тому, куда сейчас смотрит дисплей), затем сжимается
+     * в scannerScale раз и квантуется в ячейку размером 1/displayScale блока.
      */
-    private CellPoint computeCell(double dx, double dy, double dz) {
-        double modelX = dx / scannerScale;
-        double modelY = dy / scannerScale;
-        double modelZ = dz / scannerScale;
+    private CellPoint computeCell(Vector3f direction, double distance) {
+        Vector3f displayOffset = displayBasis.toWorld(direction).mul((float) (distance / scannerScale));
 
         double cellSize = 1.0 / displayScale;
 
-        long cellX = (long) Math.floor(modelX / cellSize);
-        long cellY = (long) Math.floor(modelY / cellSize);
-        long cellZ = (long) Math.floor(modelZ / cellSize);
+        long cellX = (long) Math.floor(displayOffset.x / cellSize);
+        long cellY = (long) Math.floor(displayOffset.y / cellSize);
+        long cellZ = (long) Math.floor(displayOffset.z / cellSize);
 
         long cellKey = cellKey(cellX, cellY, cellZ);
 
@@ -280,5 +301,52 @@ public final class ScanTask extends BukkitRunnable {
     }
 
     private record CellPoint(long key, Location spawnLocation) {
+    }
+
+    /**
+     * Ортонормированный базис "право/верх/вперёд", построенный по yaw/pitch
+     * сущности — определяет, во что превращается локальное направление луча
+     * (x — вправо, y — вверх, z — вперёд) при проекции в мировые координаты.
+     */
+    private record Basis(Vector3f right, Vector3f up, Vector3f forward) {
+
+        /** Вектор направления взгляда по yaw/pitch — формула из Bukkit Location#getDirection(). */
+        private static Vector3f forwardOf(Location location) {
+            double yaw = Math.toRadians(location.getYaw());
+            double pitch = Math.toRadians(location.getPitch());
+
+            double x = -Math.sin(yaw) * Math.cos(pitch);
+            double y = -Math.sin(pitch);
+            double z = Math.cos(yaw) * Math.cos(pitch);
+
+            return new Vector3f((float) x, (float) y, (float) z).normalize();
+        }
+
+        static Basis fromLocation(Location location) {
+            Vector3f forward = forwardOf(location);
+
+            // "Право" получаем как forward × worldUp. Если взгляд направлен
+            // почти строго вверх/вниз, такой crossproduct вырождается в
+            // нулевой вектор — тогда берём другую опорную ось.
+            Vector3f worldUp = new Vector3f(0f, 1f, 0f);
+            Vector3f right = new Vector3f(forward).cross(worldUp);
+            if (right.lengthSquared() < 1e-6f) {
+                right = new Vector3f(forward).cross(new Vector3f(0f, 0f, 1f));
+            }
+            right.normalize();
+
+            Vector3f up = new Vector3f(right).cross(forward).normalize();
+
+            return new Basis(right, up, forward);
+        }
+
+        /** local.x — вправо, local.y — вверх, local.z — вперёд (относительно этого базиса). */
+        Vector3f toWorld(Vector3f local) {
+            return new Vector3f(
+                    right.x * local.x + up.x * local.y + forward.x * local.z,
+                    right.y * local.x + up.y * local.y + forward.y * local.z,
+                    right.z * local.x + up.z * local.y + forward.z * local.z
+            );
+        }
     }
 }
