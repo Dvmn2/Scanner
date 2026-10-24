@@ -1,64 +1,77 @@
-# Scanner
+# ScannerPlugin
 
-A Paper plugin that scans the terrain around an entity using raycasts and renders the result as a scaled-down 3D model next to another entity.
+Paper plugin that scans the terrain around an entity with raycasts and rebuilds it next to another entity as a small
+model made of particles or item displays. Type: Paper plugin. Companion client mod: none.
 
 ## Requirements
+- Minecraft 1.21.11, Paper, Java 21
+- No dependencies, no companion mod
 
-- Paper 1.21.11 or a compatible fork
-- Java 21
-
-## How it works
-
-The `/scan` command casts a set of rays outward from a chosen "scanner" entity in all directions, up to a configurable radius. Each ray reports the first solid block or `Interaction` entity it hits. The result is rendered as a compressed model next to a "display" entity, either as colored particles or as a grid of `ItemDisplay` entities matching the scanned blocks.
-
-Multiple scans can run concurrently; each invocation starts an independent task.
-
-## Command
-
-```
-/scan <particle|display> <scanner> <display> [maxRadius] [scannerScale] [displayScale] [delayTicks]
-/scan stop
-/scan cancel
+## Build and run
+```bash
+./gradlew build      # build/libs/ScannerPlugin-<version>.jar
+./gradlew runServer  # Paper 1.21.11 test server
 ```
 
-| Argument | Description | Default |
-|---|---|---|
-| `particle` / `display` | Rendering mode: colored dust particles or `ItemDisplay` entities | required |
-| `scanner` | Entity selector for the scan origin | required |
-| `display` | Entity selector for where the model is rendered | required |
-| `maxRadius` | Scan radius in blocks | 10 |
-| `scannerScale` | Factor by which the model is shrunk relative to the real world | 1 |
-| `displayScale` | Number of sub-cells per block edge in the rendered model (`displayScale³` display entities per block) | 1 |
-| `delayTicks` | Delay in ticks between animation steps | 1 |
-
-`stop` cancels all running scans without removing already spawned entities. `cancel` cancels all running scans and removes every `ItemDisplay` created by the plugin.
-
-## Permissions
-
-| Permission | Description | Default |
-|---|---|---|
-| `scan.admin` | Access to the `/scan` command | op |
-
-## Configuration
-
-`config.yml`:
-
-```yaml
-settings:
-  # Plugin message language: "ru", "en", or "auto".
-  # "auto" resolves per command sender: players use their client locale,
-  # console and other non-player senders default to English.
-  language: "auto"
+## Architecture
+```text
+net.dvmn2.scannerplugin
+├── ScannerPlugin           composition root
+├── Lang                    MiniMessage localisation (RU/EN)
+├── Permissions             permission constants
+├── PluginKeys              PDC key factory
+├── ScannerSettings         config snapshot
+├── ScanListener            orphan cleanup on EntitiesLoadEvent
+├── command/ScannerCommand  Brigadier tree of /scanner
+└── scan/                   scan engine
 ```
 
-## Building
+| Class | Responsibility |
+|---|---|
+| `ScannerPlugin` | composition root: wiring, enable/disable order, `reloadAll()` |
+| `ScannerSettings` | immutable `config.yml` snapshot, validation with warnings |
+| `ScanManager` | owns running scans, validates requests against limits, removes displays; main thread only |
+| `ScanTask` | one scan: ray stepping, block and Interaction hit tests, model cells |
+| `ScanRequest` | immutable scan parameters, location snapshots, delay conversion |
+| `ScanResult` | outcome enum of `ScanManager#begin` |
+| `RayDirections` | even sphere coverage; `count` sizes a scan without allocating |
+| `ScanDisplayFactory` | creates and recognises marked `ItemDisplay` entities |
+| `ScanParticles` | dust particle helpers |
+| `ScannerCommand` | `/scanner particle\|display\|stop\|cancel\|reload` |
 
-```
-./gradlew build
-```
+Threading: everything runs on the main server thread. There is no asynchronous code and no disk I/O.
 
-The compiled jar is placed in `build/libs/`.
+Lifecycle:
+- Enable: `saveDefaultConfig` → settings and language → `ScanManager#start` (orphan cleanup) → listener → command → one log line.
+- Disable: `ScanManager#shutdown` stops all scans and removes every scan display.
+- Reload: `ScannerPlugin#reloadAll` re-reads `config.yml`; running scans keep their parameters.
+
+## Public API
+None.
+
+## Protocol
+None.
+
+## Data and files
+The plugin writes no data files. `plugins/ScannerPlugin/config.yml` is the only file.
+
+Scan displays are non-persistent (`Entity#setPersistent(false)`) and marked with the PDC key `scannerplugin:scan_display`,
+so they never reach the disk and vanish when their chunk unloads or the server restarts. A marked display found
+at startup or in `EntitiesLoadEvent` is an orphan and is removed.
+
+## Conventions and constraints
+- Each ray advances `1.0` block per step. Hits are tested at integer distances, so features thinner than the step can be missed.
+- Points in unloaded chunks count as empty: the scan never loads chunks.
+- Interaction entities are collected once at launch (radius + 2 blocks around the scanner). Interactions that appear or move later are ignored, consistent with the location snapshots.
+- A ray is a hit only for blocks that have an item form (`Material#isItem`), so water, lava and technical blocks are skipped.
+- `max-rays-per-scan` is checked before any ray is allocated (`RayDirections#count`). It also caps the displays or particles a scan can create, because every ray yields at most one result.
+- The command takes the delay in seconds; `ScanRequest#delayTicks` converts it for the scheduler, minimum one tick.
+- A scan that throws is logged once at `SEVERE` and stopped; it does not affect other scans.
+
+### Migration from 1.x
+- The plugin is renamed to `ScannerPlugin`; the data folder changes from `plugins/Scanner` to `plugins/ScannerPlugin`.
+- The command is `/scanner` (was `/scan`); permissions are `scanner.*` (was `scan.admin`); the last argument is `delay` in seconds (was `delayTicks`).
+- Displays are marked with PDC instead of the custom name `scan`, and are no longer saved. Displays named `scan` left by 1.x are not touched; remove them with `/kill @e[type=item_display,name=scan]`.
 
 ## License
-
-No license specified.
+All rights reserved.

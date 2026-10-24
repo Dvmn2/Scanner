@@ -1,4 +1,25 @@
 settings:
-  # Язык сообщений плагина: "ru", "en" или "auto" (по локали игрока, консоль — en).
-  # Plugin message language: "ru", "en" or "auto" (per-player locale, console — en).
-  language: "auto"
+  # Plugin message language: "ru", "en" or "auto".
+  # "auto" uses the player's client locale; the console always gets English.
+  language: auto
+
+  # Values used when an optional /scanner argument is omitted.
+  # Scan radius in real blocks (1..max-radius-blocks).
+  default-radius-blocks: 10
+  # How many times the model is smaller than the scanned area (1..100).
+  default-scanner-scale: 1
+  # Each model block is split into display-scale^3 cells (1..max-display-scale).
+  default-display-scale: 1
+  # Delay between scan steps, seconds (0.05..3600). 0.05 equals one server tick.
+  default-delay-seconds: 0.05
+
+  # Safety limits. A scan that exceeds any of them is rejected.
+  # Maximum scan radius, blocks (1..1000).
+  max-radius-blocks: 100
+  # Maximum value of the display-scale argument (1..16).
+  max-display-scale: 4
+  # Maximum number of rays per scan (1..1000000). This also caps the number of
+  # displays or particles a single scan can create.
+  max-rays-per-scan: 50000
+  # Maximum number of scans running at the same time (1..64).
+  max-active-scans: 8

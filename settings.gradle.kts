@@ -1,1 +1,1 @@
-rootProject.name = "Scanner"
+rootProject.name = "ScannerPlugin"

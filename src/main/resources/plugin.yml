@@ -1,14 +1,27 @@
-name: Scanner
-description: A Minecraft plugin that adds a command for scanning the terrain with raycasts.
+name: ScannerPlugin
+description: Scans terrain around an entity with raycasts and shows it as a small model.
 version: '${version}'
 
-main: net.dvmn2.scanner.Scanner
-api-version: '1.21.11'
+main: net.dvmn2.scannerplugin.ScannerPlugin
+api-version: '1.21'
 load: POSTWORLD
 
 authors: [ DVMN2 ]
 
 permissions:
-  scan.admin:
-    description: "Access to scanning / Доступ к сканированию"
+  scanner.scan:
+    description: Use /scanner particle and /scanner display
     default: op
+  scanner.stop:
+    description: Use /scanner stop and /scanner cancel
+    default: op
+  scanner.reload:
+    description: Use /scanner reload
+    default: op
+  scanner.admin:
+    description: All administrative Scanner permissions
+    default: op
+    children:
+      scanner.scan: true
+      scanner.stop: true
+      scanner.reload: true
